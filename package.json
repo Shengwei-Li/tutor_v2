@@ -1,0 +1,23 @@
+{
+  "name": "tutordesk",
+  "version": "2.0.0-dev",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.11.0",
+  "bin": { "tutordesk": "./src/cli.ts" },
+  "scripts": {
+    "tutordesk": "node src/cli.ts",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}
