@@ -100,7 +100,8 @@ export async function compile(texFile: string, edition: Edition = 'student', opt
 
 /** The lesson's .tex files, the templates, and fonts/ (linked, not copied: it is large). */
 async function stage(lessonDir: string, build: string): Promise<void> {
-  for (const f of await readdir(lessonDir)) if (f.endsWith('.tex')) await copyFile(path.join(lessonDir, f), path.join(build, f));
+  // Regular files only: a link named handout.tex could point anywhere on the computer.
+  for (const d of await readdir(lessonDir, { withFileTypes: true })) if (d.isFile() && d.name.endsWith('.tex')) await copyFile(path.join(lessonDir, d.name), path.join(build, d.name));
   for (const f of await readdir(TEMPLATES)) if (/\.(cls|sty)$/.test(f)) await copyFile(path.join(TEMPLATES, f), path.join(build, f));
   const fonts = path.join(TEMPLATES, 'fonts');
   try {
@@ -109,6 +110,25 @@ async function stage(lessonDir: string, build: string): Promise<void> {
     await mkdir(path.join(build, 'fonts'));
     for (const f of await readdir(fonts)) if (/\.(otf|ttf)$/.test(f)) await copyFile(path.join(fonts, f), path.join(build, 'fonts', f));
   }
+}
+
+/** Commands that read a file; reading \input{...} arguments is how a document pulls in other files. */
+const READS = /\\(?:input|include|InputIfFileExists|IfFileExists|includegraphics|includepdf|verbatiminput|lstinputlisting|import|subimport|openin|read|readline|directlua|immediate)(?![A-Za-z])\*?\s*(?:\[[^\]]*\]\s*)?(\{[^}]*\}|\S+)/g;
+
+/**
+ * Files a document reaches outside its lesson folder: absolute paths, drive letters, `..`, or the raw
+ * file primitives. XeLaTeX refuses these itself (openin_any=p); Tectonic's --untrusted does not, and
+ * a PDF that quotes another file could end up in front of a parent. Returns what to remove.
+ */
+export function outsideReads(tex: string): string[] {
+  const out: string[] = [];
+  const body = tex.replace(/(^|[^\\])%.*$/gm, '$1');
+  for (const m of body.matchAll(READS)) {
+    const cmd = /^\\[A-Za-z]+/.exec(m[0])![0];
+    const arg = m[1]!.replace(/^\{|\}$/g, '');
+    if (/^\\(openin|read|readline|directlua|immediate)$/.test(cmd) || /^[\\/]|^[a-zA-Z]:|\.\.|^~/.test(arg)) out.push(m[0].slice(0, 80));
+  }
+  return out;
 }
 
 /**

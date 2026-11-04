@@ -63,9 +63,9 @@ export async function init(dir: string, o: InitOptions = {}): Promise<string[]> 
     await writeFile(config, `studio: ${JSON.stringify(o.studio ?? 'My Tutoring Studio')}\ntutor: ${JSON.stringify(o.tutor ?? '')}\n`);
     done.push('tutordesk.yaml');
   }
-  await writeFile(path.join(root, 'AGENTS.md'), AGENTS_MD);
-  await writeFile(path.join(root, 'CLAUDE.md'), '@AGENTS.md\n');
-  done.push('AGENTS.md, CLAUDE.md');
+  for (const [name, text] of [['AGENTS.md', AGENTS_MD], ['CLAUDE.md', '@AGENTS.md\n']] as const) {
+    done.push(await writeOwn(path.join(root, name), text));
+  }
 
   for (const r of SKILL_ROOTS) {
     // Replace each skill folder whole, so files a newer version dropped do not linger.
@@ -90,6 +90,17 @@ export async function init(dir: string, o: InitOptions = {}): Promise<string[]> 
     done.push(`MCP server for Codex (${codexConfig()})`);
   }
   return done;
+}
+
+const MARK = '<!-- Written by tutordesk init; it replaces this file. Delete this line to keep your own version. -->';
+
+/** Write a file TutorDesk owns; a file someone else wrote (no mark) is left alone. */
+async function writeOwn(file: string, text: string): Promise<string> {
+  const name = path.basename(file);
+  const old = await readFile(file, 'utf8').catch(() => null);
+  if (old !== null && !old.startsWith(MARK)) return `${name} left as it is (not written by tutordesk)`;
+  await writeFile(file, `${MARK}\n${text}`);
+  return name;
 }
 
 async function mergeJson(file: string, change: (j: Record<string, unknown>) => Record<string, unknown>): Promise<void> {

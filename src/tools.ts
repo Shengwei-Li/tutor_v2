@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { buildShare } from './share.ts';
-import { compile, type Edition, type Engine, type TexError } from './tex.ts';
+import { readdir, readFile } from 'node:fs/promises';
+import { compile, outsideReads, type Edition, type Engine, type TexError } from './tex.ts';
 import { ID, listStudents, readLesson, readStudent, studentsDir, type Problem } from './workspace.ts';
 
 /**
@@ -18,6 +19,7 @@ const fail = (text: string): ToolResult => ({ text, isError: true });
 const listProblems = (ps: Problem[]) => ps.map((p) => `- ${p.file}: ${p.message}`).join('\n');
 
 export async function checkWorkspace(root: string, studentId?: string): Promise<ToolResult> {
+  if (studentId !== undefined && !ID.test(studentId)) return fail('student is a folder name (lower-case letters, digits, dashes).');
   const students = studentId ? [await readStudent(root, studentId)] : await listStudents(root);
   if (!students.length) return { text: 'No students yet.' };
   const lines: string[] = [];
@@ -57,7 +59,13 @@ export async function exportPdf(root: string, a: { student: string; lesson: stri
   if (!lesson.plan) return fail(`The lesson has no valid plan.md:\n${listProblems(problems)}`);
   if (lesson.plan.status === 'draft') return fail('The tutor has not approved this plan yet (plan.md status: draft). Show the tutor the plan and wait; set status: approved only when the tutor says so.');
   if (!lesson.sources.includes(a.file)) return fail(`No ${a.file} in ${a.lesson}. The lesson has: ${lesson.sources.join(', ') || 'no .tex files'}.`);
-  const file = path.join(studentsDir(root), a.student, 'lessons', a.lesson, a.file);
+  const dir = path.join(studentsDir(root), a.student, 'lessons', a.lesson);
+  // Every .tex in the folder can be \input, so all of them are checked.
+  for (const f of (await readdir(dir)).filter((x) => x.endsWith('.tex'))) {
+    const reads = outsideReads(await readFile(path.join(dir, f), 'utf8'));
+    if (reads.length) return fail(`Not exported: ${f} reads files outside the lesson folder, which materials never need. Remove:\n${reads.map((r) => `- ${r}`).join('\n')}`);
+  }
+  const file = path.join(dir, a.file);
   const r = await compile(file, a.edition ?? 'student', { engine });
   const blockers = r.errors.filter(blocking);
   if (blockers.length || !r.ok) {

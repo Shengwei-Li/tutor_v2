@@ -2,7 +2,7 @@ import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { TEMPLATES, compile, findEngine, parseLog } from '../src/tex.ts';
+import { TEMPLATES, compile, findEngine, outsideReads, parseLog } from '../src/tex.ts';
 
 describe('parseLog', () => {
   it('finds errors with file and line, missing glyphs and overfull boxes', () => {
@@ -46,4 +46,17 @@ describe.skipIf(!engine)(`compiling with ${engine?.kind}`, () => {
     expect(r.ok).toBe(false);
     expect(r.errors[0]).toMatchObject({ severity: 'error', file: 'broken.tex', line: 4 });
   }, 60_000);
+});
+
+describe('outsideReads', () => {
+  it('finds reads outside the lesson folder, and leaves local inputs and comments alone', () => {
+    const tex = String.raw`\input{C:/Users/x/secret.txt}
+\input{../../notes.md}
+\includegraphics[width=3cm]{/etc/passwd}
+\input{lesson-peel}
+\input ~/x
+% \input{/ok-in-comment}
+\openin5=x`;
+    expect(outsideReads(tex)).toEqual([String.raw`\input{C:/Users/x/secret.txt}`, String.raw`\input{../../notes.md}`, String.raw`\includegraphics[width=3cm]{/etc/passwd}`, String.raw`\input ~/x`, String.raw`\openin5=x`]);
+  });
 });

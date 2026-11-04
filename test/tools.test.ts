@@ -38,6 +38,10 @@ describe('export_pdf gates', () => {
     expect((await exportPdf(root, { student: 'mina', lesson: '2026-11-07-peel', file: '../x.tex' })).isError).toBe(true);
     await setLessonStatus(root, 'mina', '2026-11-07-peel', 'approved');
     expect((await exportPdf(root, { student: 'mina', lesson: '2026-11-07-peel', file: 'worksheet.tex' })).text).toMatch(/No worksheet.tex/);
+    // Any .tex in the folder can be \input, so one that reads outside blocks every export.
+    await writeFile(path.join(lessonDir(), 'notes.tex'), String.raw`\input{../../notes.md}`);
+    const r = await exportPdf(root, { student: 'mina', lesson: '2026-11-07-peel', file: 'handout.tex' });
+    expect(r.text).toContain('notes.tex reads files outside the lesson folder');
   });
 
   it.skipIf(!engine)('exports an approved lesson, and lists what to fix in a broken one', async () => {

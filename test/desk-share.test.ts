@@ -4,7 +4,8 @@ import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createDesk } from '../src/desk.ts';
+import { T_EN, createDesk, tasks } from '../src/desk.ts';
+import { listStudents } from '../src/workspace.ts';
 import { buildShare, calendar } from '../src/share.ts';
 
 let root: string;
@@ -63,13 +64,28 @@ describe('desk', () => {
   });
   afterEach(() => new Promise<void>((r) => server.close(() => r())));
 
+  it('lists what needs the tutor, approvals first, with a sentence for the agent', async () => {
+    const students = await listStudents(root);
+    const list = tasks(students, NOW, { ...T_EN });
+    expect(list.map((k) => [k.kind, k.date])).toEqual([
+      ['approve', '2026-11-05'],
+      ['prepare', '2026-11-10'],
+    ]);
+    expect(list[1]!.say).toBe("Prepare Wang Yiran's lesson on 11/10.");
+    // A finished lesson with materials but no record asks for one.
+    await put('students/wang-yiran/lessons/2026-11-03-diagnostic/plan.md', '---\ndate: 2026-11-03\ntopic: Diagnostic\nstatus: ready\n---\n');
+    await rm(path.join(root, 'students/wang-yiran/lessons/2026-11-03-diagnostic/record.md'));
+    expect(tasks(await listStudents(root), NOW, T_EN).map((k) => k.kind)).toContain('record');
+  });
+
   it('shows the week with prepared lessons and empty slots', async () => {
-    const html = await (await fetch(`${base}/`)).text();
-    expect(html).toMatch(/Tue 11\/3.*Diagnostic.*Taught/s);
-    expect(html).toMatch(/Thu 11\/5.*Stating a position.*Plan to approve/s);
-    expect(html).not.toMatch(/Thu 11\/5<\/h3><a class="slot ghost"/);
+    const html = await (await fetch(`${base}/?static`)).text();
+    expect(html).toMatch(/<div class="n">03<\/div><div class="w">Tue<\/div><a class="slot" href="\/s\/wang-yiran\/l\/2026-11-03-diagnostic">.*?Diagnostic/s);
+    expect(html).toMatch(/<div class="n">05<\/div>.*?Stating a position<\/div><span class="pipe draft"/s);
     const next = await (await fetch(`${base}/?w=1`)).text();
-    expect(next).toMatch(/Tue 11\/10<\/h3><a class="slot ghost" href="\/s\/wang-yiran"><b>19:00 Wang Yiran<\/b><small>not prepared/);
+    expect(next).toMatch(/<div class="n">10<\/div><div class="w">Tue<\/div><a class="slot empty" href="\/s\/wang-yiran"><div class="t">19:00<\/div><div class="who">Wang Yiran<\/div><div class="what">Not prepared/);
+    expect((await fetch(`${base}/s/nobody`)).status).toBe(404);
+    expect((await fetch(`${base}/s/wang-yiran/l/2026-01-01-none`)).status).toBe(404);
   });
 
   it('approves a plan only with the page token', async () => {

@@ -41,6 +41,14 @@ describe('init', () => {
     expect(codex).not.toContain('"old"');
   });
 
+  it("keeps an AGENTS.md or CLAUDE.md the tutor wrote, and refreshes its own", async () => {
+    await writeFile(path.join(root, 'CLAUDE.md'), 'My own instructions.\n');
+    const done = await init(root, { codex: false });
+    expect(done).toContain('CLAUDE.md left as it is (not written by tutordesk)');
+    expect(await readFile(path.join(root, 'CLAUDE.md'), 'utf8')).toBe('My own instructions.\n');
+    expect(await init(root, { codex: false })).toContain('AGENTS.md');
+  });
+
   it('refuses to overwrite a config file it cannot read', async () => {
     await writeFile(path.join(root, 'opencode.json'), '{ broken');
     await expect(init(root, { codex: false })).rejects.toThrow(/opencode.json is not valid JSON/);
