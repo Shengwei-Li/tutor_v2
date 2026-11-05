@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { access } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const isWin = process.platform === 'win32';
@@ -19,6 +19,28 @@ export async function which(name: string): Promise<string | null> {
   for (const d of dirs) {
     const f = path.join(d, isWin ? `${name}.exe` : name);
     if (await exists(f)) return f;
+  }
+  return null;
+}
+
+/**
+ * A command line program as [program, ...leading args], following npm's Windows .cmd launchers to what
+ * they start: a .cmd file can only run through a shell, which breaks paths with spaces.
+ */
+export async function findProgram(name: string): Promise<string[] | null> {
+  const direct = await which(name);
+  if (direct || !isWin) return direct ? [direct] : null;
+  const dirs = (process.env.PATH ?? process.env.Path ?? '').split(path.delimiter).filter(Boolean);
+  for (const d of dirs) {
+    const shim = path.join(d, `${name}.cmd`);
+    if (!(await exists(shim))) continue;
+    const text = await readFile(shim, 'utf8');
+    const target = [...text.matchAll(/"%~?dp0%\\?([^"]+)"/gi)].map((m) => m[1]!).reverse().find((t) => !/node(\.exe)?$/i.test(t));
+    if (!target) continue;
+    const full = path.join(d, target);
+    if (/\.exe$/i.test(full)) return [full];
+    const node = await which('node');
+    if (/\.[cm]?js$/i.test(full) && node) return [node, full];
   }
   return null;
 }

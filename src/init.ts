@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { rememberWorkspace } from './home.ts';
 import { SKILLS, selfCommand } from './paths.ts';
-import { exists } from './proc.ts';
+import { exists, findProgram, run } from './proc.ts';
 
 /**
  * Setting up: a workspace (a folder of student files the agents work in), and the agents themselves
@@ -99,6 +99,18 @@ export function mcpCommand(workspace?: string): { command: string; args: string[
 const home = () => os.homedir();
 export const codexConfig = () => path.join(process.env.CODEX_HOME ?? path.join(home(), '.codex'), 'config.toml');
 const claudeConfig = () => path.join(home(), '.claude.json');
+
+/**
+ * Claude Code's own command line: it rewrites ~/.claude.json while it runs, so the entry is added the
+ * way Claude Code itself does it. TUTORDESK_CLAUDE_CLI (a JSON array, or empty for none) is for tests.
+ */
+async function claudeCli(): Promise<string[] | null> {
+  const given = process.env.TUTORDESK_CLAUDE_CLI;
+  if (given !== undefined) return given ? (JSON.parse(given) as string[]) : null;
+  return findProgram('claude');
+}
+
+const claudeRun = (cli: string[], args: string[]) => run(cli[0]!, [...cli.slice(1), 'mcp', ...args], { cwd: home(), timeoutMs: 60_000 });
 /** OpenCode reads opencode.json or opencode.jsonc (JSON with comments); use the one the tutor has. */
 async function opencodeConfig(): Promise<string> {
   const dir = path.join(process.env.XDG_CONFIG_HOME ?? path.join(home(), '.config'), 'opencode');
@@ -123,9 +135,16 @@ export async function connectAgents(): Promise<string[]> {
     await registerCodex(mcp);
     done.push(`Codex: ${codexConfig()}`);
   }
-  if (await exists(claudeConfig())) {
+  const claude = await claudeCli();
+  if (claude) {
+    await claudeRun(claude, ['remove', '--scope', 'user', 'tutordesk']);
+    const env = Object.entries(mcp.env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+    const r = await claudeRun(claude, ['add', '--scope', 'user', 'tutordesk', ...env, '--', mcp.command, ...mcp.args]);
+    done.push(r.code === 0 ? 'Claude Code (claude mcp add)' : `Claude Code: could not add the server (${r.output.trim().split('\n').at(-1)})`);
+  } else if (await exists(claudeConfig())) {
+    // No claude command (rare): edit the file. Claude Code may write over it if it is open right now.
     await mergeJson(claudeConfig(), (j) => ({ ...j, mcpServers: { ...(j.mcpServers as object), tutordesk: { type: 'stdio', ...mcp } } }));
-    done.push(`Claude Code: ${claudeConfig()}`);
+    done.push(`Claude Code: ${claudeConfig()} (if Claude Code was open, restart it)`);
   }
   const opencode = await opencodeConfig();
   if (await exists(path.dirname(opencode))) {
@@ -147,7 +166,12 @@ export async function disconnectAgents(): Promise<string[]> {
     await writeFile(codexConfig(), `${withoutCodexTable(text)}\n`);
     done.push('Codex');
   }
-  for (const [file, key] of [[claudeConfig(), 'mcpServers'], [await opencodeConfig(), 'mcp']] as const) {
+  const claude = await claudeCli();
+  if (claude) {
+    await claudeRun(claude, ['remove', '--scope', 'user', 'tutordesk']);
+    done.push('Claude Code');
+  }
+  for (const [file, key] of [...(claude ? [] : [[claudeConfig(), 'mcpServers'] as const]), [await opencodeConfig(), 'mcp'] as const]) {
     if (!(await exists(file))) continue;
     await mergeJson(file, (j) => {
       const servers = { ...(j[key] as Record<string, unknown>) };

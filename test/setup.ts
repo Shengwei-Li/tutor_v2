@@ -4,3 +4,5 @@ import path from 'node:path';
 
 // No test may touch the real ~/.tutordesk.
 process.env.TUTORDESK_HOME = mkdtempSync(path.join(os.tmpdir(), 'td2-tutordesk-home-'));
+// Nor the real `claude` command: tests that need one supply a stand-in.
+process.env.TUTORDESK_CLAUDE_CLI = '';

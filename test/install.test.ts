@@ -116,3 +116,26 @@ describe('never moving into a folder in use', () => {
     expect(await exists(path.join(v1, 'tutordesk.yaml'))).toBe(false);
   });
 });
+
+describe('Claude Code through its own command', () => {
+  it('replaces the entry with claude mcp, and leaves ~/.claude.json to Claude Code', async () => {
+    const log = path.join(home, 'claude.log');
+    process.env.FAKE_CLAUDE_LOG = log;
+    process.env.TUTORDESK_CLAUDE_CLI = JSON.stringify([process.execPath, path.resolve('test/fixtures/fake-claude.mjs')]);
+    process.env.TUTORDESK_TECTONIC = 'C:/tex';
+    try {
+      await writeFile(path.join(home, '.claude.json'), '{"projects":{}}');
+      await connectAgents();
+      await disconnectAgents();
+      const calls = (await readFile(log, 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as string[]);
+      expect(calls[0]).toEqual(['mcp', 'remove', '--scope', 'user', 'tutordesk']);
+      expect(calls[1]!.slice(0, 7)).toEqual(['mcp', 'add', '--scope', 'user', 'tutordesk', '-e', 'TUTORDESK_TECTONIC=C:/tex']);
+      expect(calls[1]!.slice(-1)).toEqual(['mcp']);
+      expect(calls[2]).toEqual(['mcp', 'remove', '--scope', 'user', 'tutordesk']);
+      expect(await readFile(path.join(home, '.claude.json'), 'utf8')).toBe('{"projects":{}}');
+    } finally {
+      process.env.TUTORDESK_CLAUDE_CLI = '';
+      delete process.env.TUTORDESK_TECTONIC;
+    }
+  });
+});
