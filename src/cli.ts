@@ -1,21 +1,27 @@
 #!/usr/bin/env node
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
+import { openBrowser, startDesk } from './desk.ts';
+import { findWorkspace } from './home.ts';
 import { init } from './init.ts';
+import { install, needsInstall, uninstall } from './install.ts';
 import { serveMcp } from './mcp.ts';
+import { SEA, VERSION } from './paths.ts';
 import { checkWorkspace } from './tools.ts';
 
-const USAGE = `tutordesk: lesson preparation for one-to-one IELTS and PTE tutors
+const USAGE = `TutorDesk ${VERSION}: lesson preparation for one-to-one IELTS and PTE tutors
 
-  tutordesk init [folder]     make a folder a workspace (or refresh one) and connect your agents
-  tutordesk open [folder]     open the desk in your browser
+Tutors double-click the program once; after that, the desktop shortcut opens the desk, and their
+agent (Codex, Claude Code, OpenCode) does the rest. These commands are for setting up and fixing:
+
+  tutordesk install           connect the agents on this computer, the PDF engine, a workspace, the shortcut
+  tutordesk uninstall         undo install (student files stay)
+  tutordesk open [folder]     open the desk
   tutordesk check [folder]    list students and lessons, and any file that needs fixing
-  tutordesk mcp               the MCP server your agent starts (you never run this yourself)
+  tutordesk init <folder>     development: a workspace that carries its own skills and agent config
+  tutordesk mcp               the MCP server agents start (never run by hand)
 
-Options: --studio "Name" --tutor "Name" (init), --no-codex (init: leave Codex alone), --port 4321 and --no-browser (open)`;
-
-const version = (JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
+Options: --studio, --tutor, --no-codex (init); --port, --no-browser (open)`;
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -29,29 +35,73 @@ const { values, positionals } = parseArgs({
     help: { type: 'boolean', short: 'h' },
   },
 });
-const [command, folder] = positionals;
-const root = path.resolve(values.workspace ?? folder ?? '.');
+async function main(): Promise<void> {
+  const [given, folder] = positionals;
+  // Double-clicked: install the first time (or after an update), then open the desk.
+  const command = given ?? (SEA ? ((await needsInstall()) ? 'install' : 'open') : 'help');
 
-switch (values.help ? 'help' : command) {
-  case 'init':
-    for (const line of await init(root, { studio: values.studio, tutor: values.tutor, codex: !values['no-codex'] })) console.log(`  ${line}`);
-    console.log(`\n${root} is ready. Open your agent in this folder and describe your first student.`);
-    break;
-  case 'mcp':
-    await serveMcp(root, version);
-    break;
-  case 'check': {
-    const r = await checkWorkspace(root);
-    console.log(r.text);
-    process.exitCode = r.isError ? 1 : 0;
-    break;
+  async function openDesk(root: string | null): Promise<void> {
+    if (!root) {
+      console.error('No TutorDesk workspace yet. Run `tutordesk install`, or open your agent and describe your first student.');
+      process.exitCode = 1;
+      return;
+    }
+    const url = await startDesk(root, { port: values.port ? Number(values.port) : undefined });
+    console.log(`TutorDesk desk: ${url}  (keep this window open while you use it)`);
+    if (!values['no-browser']) openBrowser(url);
   }
-  case 'open': {
-    const { openDesk } = await import('./desk.ts');
-    await openDesk(root, Number(values.port ?? 4321), !values['no-browser']);
-    break;
+
+  switch (values.help ? 'help' : command) {
+    case 'install': {
+      const workspace = await install();
+      console.log(`\nTutorDesk is ready. Open your agent (Codex, Claude Code or OpenCode) and say hello to your first student.`);
+      await openDesk(workspace);
+      break;
+    }
+    case 'uninstall':
+      await uninstall();
+      break;
+    case 'open':
+      await openDesk(await findWorkspace(folder ?? values.workspace));
+      break;
+    case 'check': {
+      const root = await findWorkspace(folder ?? values.workspace);
+      if (!root) {
+        console.error('No TutorDesk workspace here.');
+        process.exitCode = 1;
+        break;
+      }
+      const r = await checkWorkspace(root);
+      console.log(r.text);
+      process.exitCode = r.isError ? 1 : 0;
+      break;
+    }
+    case 'init': {
+      if (!folder) {
+        console.error('init needs a folder.');
+        process.exitCode = 1;
+        break;
+      }
+      const root = path.resolve(folder);
+      for (const line of await init(root, { studio: values.studio, tutor: values.tutor, codex: !values['no-codex'] })) console.log(`  ${line}`);
+      console.log(`\n${root} is ready. Open your agent in this folder and describe your first student.`);
+      break;
+    }
+    case 'mcp':
+      await serveMcp(VERSION, { workspace: values.workspace });
+      break;
+    default:
+      console.log(USAGE);
+      process.exitCode = given && given !== 'help' ? 1 : 0;
   }
-  default:
-    console.log(USAGE);
-    process.exitCode = command && command !== 'help' ? 1 : 0;
 }
+
+main().catch(async (e: unknown) => {
+  console.error((e as Error).message);
+  process.exitCode = 1;
+  // Double-clicked: the window would close before the tutor could read what went wrong.
+  if (SEA && !positionals.length) {
+    console.error('\nPress Enter to close.');
+    await new Promise((r) => process.stdin.once('data', r));
+  }
+});

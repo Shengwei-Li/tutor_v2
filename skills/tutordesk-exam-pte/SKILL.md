@@ -1,5 +1,5 @@
 ---
-name: exam-pte
+name: tutordesk-exam-pte
 description: PTE Academic facts, the TutorDesk PTE error codes and the rules on published material. Use whenever you state anything about PTE or tag a PTE error.
 ---
 
@@ -19,7 +19,7 @@ Use only these facts; some 2025 details are unverified, so never state exact wei
 
 ## Error codes
 
-PTE-FORM-SWT, PTE-FORM-WC (word count), PTE-WFD-MISS, PTE-WFD-SPELL, PTE-RS-MISS, PTE-FLU-HES, PTE-FLU-REP, PTE-DI-STRUCT, PTE-MC-NEG, PTE-FIB-COLL, PTE-FIB-GRAM, PTE-TIME. Writing and grammar errors use the W- codes from the `exam-ielts` skill.
+PTE-FORM-SWT, PTE-FORM-WC (word count), PTE-WFD-MISS, PTE-WFD-SPELL, PTE-RS-MISS, PTE-FLU-HES, PTE-FLU-REP, PTE-DI-STRUCT, PTE-MC-NEG, PTE-FIB-COLL, PTE-FIB-GRAM, PTE-TIME. Writing and grammar errors use the W- codes from the `tutordesk-exam-ielts` skill.
 
 ## Published material
 

@@ -14,12 +14,18 @@
 
 ## 老师怎么用
 
-```bash
-tutordesk init ~/我的学生    # 建工作区，并让 OpenCode / Codex / Claude Code 认识它
-tutordesk open ~/我的学生    # 打开备课台
-```
+1. **装一次:** 下载 TutorDesk，双击。它会自己完成：
+   - 把程序装进 `~/.tutordesk`；
+   - 下载排版引擎；
+   - 接上本机已有的 Codex、Claude Code 和 OpenCode；
+   - 在「文档」里建好 `TutorDesk` 文件夹，放学生资料；
+   - 在桌面放一个快捷方式；
+   - 打开备课台。
+2. **之后:** 打开 agent，直接说话，比如「新学生王一然，高二，雅思 6.5 目标 7，每周二四晚上七点」。
+   - agent 一开，备课台就跟着起来。想看的时候说「打开备课台」，或者双击桌面快捷方式。
+   - 想把学生资料放在别的文件夹，跟 agent 说一声，它会用 `setup_workspace` 建好。
 
-然后在这个文件夹里打开 agent，说：「新学生王一然，高二，雅思 6.5 目标 7，每周二四晚上七点」。
+老师不用敲任何命令。
 
 ## 数据：一个学生一个文件夹
 
@@ -52,7 +58,7 @@ students/wang-yiran/
 
 ## 备课台
 
-`tutordesk open` 在本机开一个网页，文件一变自动刷新：
+随 agent 启动，也能从桌面快捷方式打开；只在本机，文件一变自动刷新：
 
 - **待你处理**：要确认的计划、要备的课、要写的材料、要记录的课。需要 agent 做的，给一句话，点「复制给 agent」粘贴过去。
 - **本周课表**：每节课一条四段进度（计划、确认、材料、上课），没备的时段也列出来。
@@ -69,17 +75,21 @@ students/wang-yiran/
 
 ```
 v2/
-├── skills/            给 agent 的技能（标准 SKILL.md）
-├── src/               TypeScript，Node 24 直接运行，没有构建步骤
-│   ├── workspace.ts   学生文件夹的读取和校验
-│   ├── tex.ts         编译 PDF（Tectonic 或系统 XeLaTeX）
-│   ├── tools.ts       三个工具和关卡：check_workspace、export_pdf、share_with_parents
-│   ├── mcp.ts         MCP 服务器
-│   ├── desk.ts        备课台
-│   ├── share.ts       家长页和 .ics
-│   ├── init.ts        建工作区，接上 Claude Code / OpenCode / Codex
+├── skills/             给 agent 的技能（标准 SKILL.md）
+├── src/                TypeScript；开发时 Node 24 直接运行
+│   ├── workspace.ts    学生文件夹的读取和校验
+│   ├── tex.ts          编译 PDF（Tectonic 或系统 XeLaTeX）
+│   ├── tectonic.ts     下载 Tectonic（校验哈希）并缓存离线所需的包
+│   ├── tools.ts        关卡：check_workspace、export_pdf、share_with_parents
+│   ├── mcp.ts          MCP 服务器：找到工作区，随 agent 启动备课台，另有 setup_workspace、open_desk
+│   ├── desk.ts         备课台
+│   ├── share.ts        家长页和 .ics
+│   ├── home.ts         ~/.tutordesk 和「用哪个工作区」
+│   ├── init.ts         建工作区；把技能和服务器接到各 agent
+│   ├── install.ts      双击安装 / 卸载
 │   └── cli.ts
-├── templates/tex/     LaTeX 模板和字体（来自 v1）
+├── scripts/build.mjs   打包成单个程序（Node SEA）
+├── templates/tex/      LaTeX 模板和字体
 └── test/
 ```
 
@@ -88,16 +98,17 @@ v2/
 ```bash
 pnpm install
 pnpm test
-pnpm tutordesk init <文件夹>
-pnpm tutordesk open <文件夹>
+pnpm build                  # dist/tutordesk(.exe)
+pnpm tutordesk init <文件夹>  # 自带技能和配置的开发工作区
 ```
 
-编译用 `~/.tutordesk/tectonic`，或 `TUTORDESK_TECTONIC` 指向的目录，否则用系统的 XeLaTeX。
+打推送 `v*` 标签时，GitHub Actions 会分别构建 Windows、macOS 和 Linux 版，并发布到 Releases。
 
 ## 还没做
 
-- `tutordesk setup`：下载 Tectonic（v1 的 `apps/desktop/scripts/fetch-tectonic.mjs` 搬过来）。
 - `evals/`：典型学生和评分。
-- 打包成一个可执行文件。
+- 每个学生的版本历史和撤销。
+- macOS 的签名和公证：现在双击未签名程序会被系统拦下。
+- 插件市场（Codex、Claude）上架。
 
 v1（仓库根目录）冻结，只作参考。

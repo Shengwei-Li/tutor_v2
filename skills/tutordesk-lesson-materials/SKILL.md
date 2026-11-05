@@ -1,5 +1,5 @@
 ---
-name: lesson-materials
+name: tutordesk-lesson-materials
 description: Write TutorDesk lesson materials as LaTeX (handout, worksheet, lesson script, slides) and export them to PDF. Use after a lesson plan is approved, or when the tutor asks to change a material.
 ---
 
@@ -34,6 +34,6 @@ Read the reference and the example for a file type before writing one. Fonts and
 
 ## Export
 
-1. Review the material with the `teaching-standards` checklist and fix what falls short.
+1. Review the material with the `tutordesk-teaching-standards` checklist and fix what falls short.
 2. `export_pdf` for the student edition; also `teacher` for the handout, worksheet and script.
 3. If it refuses, fix exactly what it lists (file and line) and export again. After three failed rounds, tell the tutor what is left.

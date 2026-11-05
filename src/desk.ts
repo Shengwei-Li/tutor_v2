@@ -20,6 +20,9 @@ import { ID, LESSON_STATUS, listStudents, readStudent, setLessonStatus, students
 
 type Lang = 'en' | 'zh';
 
+/** A Latin name inside Chinese text gets a space on each side (帮 Wang Yiran 备). */
+const cjk = (name: string) => (/[A-Za-z]/.test(name) ? ` ${name} ` : name);
+
 const T = {
   en: {
     todo: 'Needs you', nothing: 'Nothing waiting. The week is in order.', week: 'Week', students: 'Students', noStudents: 'No students yet. Open your agent in this folder and describe your first student.',
@@ -48,11 +51,11 @@ const T = {
     weekdays: ['周一', '周二', '周三', '周四', '周五', '周六', '周日'],
     task: { approve: '确认', roadmap: '规划', prepare: '备课', write: '写材料', record: '记录', fix: '修正' }, countdown: '距考试',
     say: {
-      prepare: (n: string, d: string) => `帮${n}备 ${d} 的课。`,
+      prepare: (n: string, d: string) => `帮${cjk(n)}备 ${d} 的课。`,
       write: (n: string, d: string) => `${n} ${d} 那节课的计划我确认了，按计划把材料写出来并导出 PDF。`,
       record: (n: string, d: string) => `${n} ${d} 的课上完了，情况是：`,
-      fix: (n: string) => `运行 check_workspace，把${n}的文件问题都修好。`,
-      roadmap: (n: string) => `帮${n}起草课程规划。`,
+      fix: (n: string) => `运行 check_workspace，把${cjk(n)}的文件问题都修好。`,
+      roadmap: (n: string) => `帮${cjk(n)}起草课程规划。`,
     },
   },
 };
@@ -443,6 +446,11 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
         } else throw new NotFound();
         return;
       }
+      if (url.pathname === '/health') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ app: 'tutordesk', root: path.resolve(root) }));
+        return;
+      }
       if (url.pathname === '/') return html(await home(url, lang, t));
       const font = /^\/fonts\/([\w-]+\.otf)$/.exec(url.pathname);
       if (font && PLEX.includes(font[1]!)) {
@@ -472,8 +480,29 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
   };
 }
 
-/** Serve the desk on this computer only, reload pages when the workspace changes, open the browser. */
-export async function openDesk(root: string, port: number, browser = true): Promise<void> {
+export const DESK_PORT = 4321;
+
+/** A desk already serving this workspace (another agent conversation started it), if any. */
+async function runningDesk(root: string, port: number): Promise<string | null> {
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(800) });
+    const h = (await r.json()) as { app?: string; root?: string };
+    return h.app === 'tutordesk' && h.root === path.resolve(root) ? `http://127.0.0.1:${port}/` : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Serve the desk for a workspace on this computer only, reloading pages when files change. If a desk
+ * for the same workspace is already up, that one is used. Returns its address.
+ */
+export async function startDesk(root: string, o: { port?: number; background?: boolean } = {}): Promise<string> {
+  const port = o.port ?? DESK_PORT;
+  for (let p = port; p < port + 20; p++) {
+    const existing = await runningDesk(root, p);
+    if (existing) return existing;
+  }
   const desk = createDesk(root);
   const server = createServer((req, res) => void desk.handle(req, res));
   const listen = (p: number): Promise<number> =>
@@ -482,15 +511,19 @@ export async function openDesk(root: string, port: number, browser = true): Prom
       server.listen(p, '127.0.0.1', () => resolve(p));
     });
   const actual = await listen(port);
+  // Inside an agent's MCP server the desk must not keep the process alive after the agent leaves.
+  if (o.background) server.unref();
   let timer: NodeJS.Timeout | undefined;
-  watch(root, { recursive: true }, (_e, f) => {
+  const watcher = watch(root, { recursive: true }, (_e, f) => {
     if (f && /^(\.git|\.agents|\.claude|node_modules)[\\/]/.test(f)) return;
     clearTimeout(timer);
     timer = setTimeout(desk.changed, 300);
   });
-  const url = `http://127.0.0.1:${actual}/`;
-  console.log(`TutorDesk desk: ${url}  (Ctrl+C to stop)`);
-  if (!browser) return;
+  if (o.background) watcher.unref();
+  return `http://127.0.0.1:${actual}/`;
+}
+
+export function openBrowser(url: string): void {
   const opener = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
   spawn(opener[0] as string, opener[1] as string[], { stdio: 'ignore', detached: true }).unref();
 }

@@ -74,7 +74,7 @@ export async function exportPdf(root: string, a: { student: string; lesson: stri
   const rel = path.relative(root, r.pdf!).replace(/\\/g, '/');
   // Only warnings the document itself can fix; the templates' own (font features, LaTeX release) are not.
   const warnings = r.errors.filter((e) => e.severity === 'warning' && /undefined|multiply defined/i.test(e.message)).slice(0, 5);
-  return { text: `Exported ${rel}.${warnings.length ? `\nWarnings worth a look:\n${warnings.map((e) => `- ${e.message}`).join('\n')}` : ''}` };
+  return { text: `Exported ${rel}. When every material the plan lists is exported, set status: ready in plan.md and tell the tutor what is ready.${warnings.length ? `\nWarnings worth a look:\n${warnings.map((e) => `- ${e.message}`).join('\n')}` : ''}` };
 }
 
 export async function shareWithParents(root: string, student: string, lang: 'en' | 'zh'): Promise<ToolResult> {

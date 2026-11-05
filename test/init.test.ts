@@ -11,9 +11,11 @@ beforeEach(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), 'td2-init-'));
   home = await mkdtemp(path.join(os.tmpdir(), 'td2-codex-'));
   process.env.CODEX_HOME = home;
+  process.env.TUTORDESK_HOME = home;
 });
 afterEach(async () => {
   delete process.env.CODEX_HOME;
+  delete process.env.TUTORDESK_HOME;
   await rm(root, { recursive: true, force: true });
   await rm(home, { recursive: true, force: true });
 });
@@ -26,8 +28,8 @@ describe('init', () => {
     await init(root);
 
     expect(await readFile(path.join(root, 'tutordesk.yaml'), 'utf8')).toContain('studio: "Northbridge"');
-    expect(await exists(path.join(root, '.agents/skills/lesson-prep/SKILL.md'))).toBe(true);
-    expect(await exists(path.join(root, '.claude/skills/lesson-materials/examples/handout.tex'))).toBe(true);
+    expect(await exists(path.join(root, '.agents/skills/tutordesk-lesson-prep/SKILL.md'))).toBe(true);
+    expect(await exists(path.join(root, '.claude/skills/tutordesk-lesson-materials/examples/handout.tex'))).toBe(true);
 
     const oc = JSON.parse(await readFile(path.join(root, 'opencode.json'), 'utf8'));
     expect(oc.model).toBe('zen/big');
@@ -44,7 +46,7 @@ describe('init', () => {
   it("keeps an AGENTS.md or CLAUDE.md the tutor wrote, and refreshes its own", async () => {
     await writeFile(path.join(root, 'CLAUDE.md'), 'My own instructions.\n');
     const done = await init(root, { codex: false });
-    expect(done).toContain('CLAUDE.md left as it is (not written by tutordesk)');
+    expect(done).toContain('CLAUDE.md left as it is (not written by TutorDesk)');
     expect(await readFile(path.join(root, 'CLAUDE.md'), 'utf8')).toBe('My own instructions.\n');
     expect(await init(root, { codex: false })).toContain('AGENTS.md');
   });

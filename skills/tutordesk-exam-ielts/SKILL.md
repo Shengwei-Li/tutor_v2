@@ -1,5 +1,5 @@
 ---
-name: exam-ielts
+name: tutordesk-exam-ielts
 description: IELTS facts, a paraphrased writing descriptor summary, the TutorDesk error codes, and the rules on published exam material. Use whenever you state anything about IELTS, score IELTS writing, or tag an error.
 ---
 

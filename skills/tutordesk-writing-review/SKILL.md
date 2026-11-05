@@ -1,5 +1,5 @@
 ---
-name: writing-review
+name: tutordesk-writing-review
 description: Review a student's IELTS Writing Task 1 or 2 essay, or transcribe a photographed one, into the TutorDesk student folder. Use when the tutor asks to mark, review, correct or transcribe an essay.
 ---
 
@@ -13,7 +13,7 @@ Transcribe exactly as written: keep the student's mistakes, mark unreadable word
 
 ## Review
 
-Read `profile.md`, earlier reviews and the `exam-ielts` skill, then write `review.md`:
+Read `profile.md`, earlier reviews and the `tutordesk-exam-ielts` skill, then write `review.md`:
 
 ```markdown
 ---

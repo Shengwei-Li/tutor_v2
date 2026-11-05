@@ -1,0 +1,30 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: windows-latest, file: tutordesk.exe, name: TutorDesk-windows-x64.exe }
+          - { os: macos-latest, file: tutordesk, name: TutorDesk-macos-arm64 }
+          - { os: macos-13, file: tutordesk, name: TutorDesk-macos-x64 }
+          - { os: ubuntu-latest, file: tutordesk, name: TutorDesk-linux-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm build
+      - run: node -e "require('fs').renameSync('dist/${{ matrix.file }}', 'dist/${{ matrix.name }}')"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.name }}

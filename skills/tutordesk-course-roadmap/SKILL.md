@@ -1,5 +1,5 @@
 ---
-name: course-roadmap
+name: tutordesk-course-roadmap
 description: Draft or revise a student's TutorDesk course roadmap (roadmap.md) from their profile, diagnosis and time to the exam. Use when the tutor asks for a course plan, a study plan, or what to teach next across lessons.
 ---
 

@@ -16,19 +16,32 @@ export TUTORDESK_TECTONIC="D:/home_tutor/apps/desktop/resources/tectonic"
 
 ## 2. 当一次真老师（20 分钟）
 
-**准备一个工作区。** 下面两条命令都在 `v2` 文件夹里运行，`TUTORDESK_TECTONIC` 要保持设置好：
+**安装:** 先构建程序：
 
 ```bash
-pnpm tutordesk init D:/tutor-test --studio "我的工作室" --tutor "我"
+pnpm build
 ```
+
+然后双击 `v2/dist/tutordesk.exe`。窗口里会依次显示：
+- 下载排版引擎，第一次要几分钟；
+- 接上了哪些 agent；
+- 学生资料放在哪里；
+- 最后浏览器打开备课台。
+
+桌面上会多一个 TutorDesk 快捷方式。
+
+这一步会真正改你电脑上的设置：
+- 把技能放进 `~/.agents/skills` 和 `~/.claude/skills`；
+- 在 `~/.codex/config.toml`、`~/.claude.json`（以及已安装的 OpenCode）里加上 `tutordesk` 一项；
+- 在「文档」里建 `TutorDesk` 文件夹。
+
+测完想撤销，运行下面这条（学生文件不动）：
 
 ```bash
-pnpm tutordesk open D:/tutor-test
+~/.tutordesk/bin/tutordesk.exe uninstall
 ```
 
-第一条命令会把 TutorDesk 接到 Claude Code、OpenCode 和 Codex 上。Codex 只认用户级配置，所以这一步会改 `~/.codex/config.toml` 里的 `[mcp_servers.tutordesk]` 一节，其余内容不动。第二条命令会在浏览器里打开备课台，让它一直开着。
-
-**在 `D:/tutor-test` 里打开 agent**（Codex 应用、`codex` 或 `opencode`），然后照着做：
+**打开 agent**（Codex 应用、`codex` 或 `opencode`，在「文档/TutorDesk」或任意文件夹里都行），然后照着做：
 
 | 你说 / 你做 | 应该看到 |
 |---|---|

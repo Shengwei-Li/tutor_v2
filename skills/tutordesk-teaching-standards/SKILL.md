@@ -1,5 +1,5 @@
 ---
-name: teaching-standards
+name: tutordesk-teaching-standards
 description: The evidence-based teaching rules and the review checklist every TutorDesk plan and material must pass. Use before showing a lesson plan to the tutor and before exporting any material.
 ---
 

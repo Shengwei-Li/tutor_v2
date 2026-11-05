@@ -1,5 +1,5 @@
 ---
-name: student-intake
+name: tutordesk-student-intake
 description: Create or update a TutorDesk student profile from the tutor's description. Use when the tutor describes a new student, or a change to a student (target, exam date, timetable, level).
 ---
 
@@ -29,7 +29,7 @@ Loves basketball and films. Quiet at first; needs a worked example before trying
 1. Exam, target and the weekly schedule matter most. If one is missing, ask one short question first.
 2. Write only what the tutor said. Never invent a level, a date or a trait.
 3. Create the folder and `profile.md`, then run `check_workspace` and fix what it reports.
-4. Tell the tutor in two lines what you recorded and what you assumed, and offer to draft the course roadmap (`course-roadmap` skill).
+4. Tell the tutor in two lines what you recorded and what you assumed, and offer to draft the course roadmap (`tutordesk-course-roadmap` skill).
 
 ## Changes
 

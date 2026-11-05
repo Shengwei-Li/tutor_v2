@@ -1,5 +1,5 @@
 ---
-name: lesson-prep
+name: tutordesk-lesson-prep
 description: Plan one TutorDesk lesson for a student, wait for the tutor's approval, then write and export its materials. Use when the tutor asks to prepare, plan or get ready for a lesson.
 ---
 
@@ -14,7 +14,7 @@ Read, in the student folder:
 - `essays/*/review.md`: recent errors with their codes.
 - `notes.md`: the tutor's observations.
 
-If there is no `roadmap.md` yet, use the `course-roadmap` skill first.
+If there is no `roadmap.md` yet, use the `tutordesk-course-roadmap` skill first.
 
 ## 2. Write the plan
 
@@ -46,7 +46,7 @@ By the end, Yiran can … (observable, each with how it is checked)
 handout, worksheet, deck (script only if the tutor wants one)
 ```
 
-Rules: stage minutes add up to the lesson length; one core skill; open with retrieval of last lesson; a check stage tests every objective; the student produces language for at least half the lesson. Check the plan against `teaching-standards` before showing it.
+Rules: stage minutes add up to the lesson length; one core skill; open with retrieval of last lesson; a check stage tests every objective; the student produces language for at least half the lesson. Check the plan against `tutordesk-teaching-standards` before showing it.
 
 Run `check_workspace` for the student and fix anything it reports.
 
@@ -58,4 +58,4 @@ Set `status: approved` only when the tutor approves in so many words; if they as
 
 ## 4. Materials
 
-Use the `lesson-materials` skill for each material the plan lists. When every PDF is exported, set `status: ready` and tell the tutor what is ready and anything worth a look.
+Use the `tutordesk-lesson-materials` skill for each material the plan lists. When every PDF is exported, set `status: ready` and tell the tutor what is ready and anything worth a look.

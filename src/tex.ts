@@ -1,11 +1,13 @@
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { tutordeskHome } from './home.ts';
+import { TEMPLATES } from './paths.ts';
 import { exists, run, which, type RunResult } from './proc.ts';
 
+
 /** The LaTeX classes, themes and fonts every document is set with. */
-export const TEMPLATES = fileURLToPath(new URL('../templates/tex/', import.meta.url));
+export { TEMPLATES };
 
 export interface Engine {
   kind: 'tectonic' | 'xelatex';
@@ -16,7 +18,7 @@ export interface Engine {
 
 /** Where `tutordesk setup` puts Tectonic and its cache. TUTORDESK_TECTONIC points elsewhere. */
 export function tectonicHome(): string {
-  return process.env.TUTORDESK_TECTONIC ?? path.join(os.homedir(), '.tutordesk', 'tectonic');
+  return process.env.TUTORDESK_TECTONIC ?? path.join(tutordeskHome(), 'tectonic');
 }
 
 /**
@@ -53,7 +55,7 @@ export interface CompileResult {
  * Compile one .tex file of a lesson folder. The folder's other .tex files can be \input; the PDF lands
  * in out/<name>.pdf, or out/<name>-teacher.pdf for the edition with answers and notes.
  */
-export async function compile(texFile: string, edition: Edition = 'student', opts: { timeoutMs?: number; engine?: Engine } = {}): Promise<CompileResult> {
+export async function compile(texFile: string, edition: Edition = 'student', opts: { timeoutMs?: number; engine?: Engine; /** Tectonic may fetch packages (setup only). */ online?: boolean } = {}): Promise<CompileResult> {
   const engine = opts.engine ?? (await findEngine());
   if (!engine) return { ok: false, engine: 'xelatex', errors: [{ severity: 'error', message: 'No TeX engine. Run `tutordesk setup` once to install one.' }] };
   const dir = path.dirname(texFile);
@@ -71,7 +73,7 @@ export async function compile(texFile: string, edition: Edition = 'student', opt
     const env: NodeJS.ProcessEnv = { ...process.env, openout_any: 'p', openin_any: 'p', TEXMFHOME: path.join(build, '.none'), max_print_line: '10000' };
     let r: RunResult = { code: null, output: '', timedOut: false };
     if (engine.kind === 'tectonic') {
-      r = await run(engine.binary, ['-X', 'compile', `${job}.tex`, '--untrusted', '--only-cached', '--keep-logs'], { cwd: build, env: { ...env, TECTONIC_CACHE_DIR: engine.cacheDir }, timeoutMs });
+      r = await run(engine.binary, ['-X', 'compile', `${job}.tex`, '--untrusted', ...(opts.online ? [] : ['--only-cached']), '--keep-logs'], { cwd: build, env: { ...env, TECTONIC_CACHE_DIR: engine.cacheDir }, timeoutMs });
     } else {
       // Rerun while cross-references settle, as latexmk would, all within one time budget.
       const deadline = Date.now() + timeoutMs;

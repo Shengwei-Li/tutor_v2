@@ -1,5 +1,5 @@
 ---
-name: lesson-record
+name: tutordesk-lesson-record
 description: Record how a TutorDesk lesson went (what was covered, what the student struggled with, homework) so the next lesson builds on it. Use when the tutor reports on a lesson that has happened.
 ---
 
