@@ -106,3 +106,26 @@ describe('desk', () => {
     expect(status).toBe(403);
   });
 });
+
+describe('desk idleness', () => {
+  it('is idle only while no page is open', async () => {
+    const desk = createDesk(root, { lang: 'en', now: () => NOW });
+    const server = createServer((req, res) => void desk.handle(req, res));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const events = new AbortController();
+      const res = await fetch(`${base}/events`, { signal: events.signal });
+      await res.body!.getReader().read();
+      await new Promise((r) => setTimeout(r, 30));
+      expect(desk.idleMs()).toBe(0);
+      events.abort();
+      await new Promise((r) => setTimeout(r, 50));
+      expect(desk.idleMs()).toBeGreaterThanOrEqual(0);
+      expect(desk.idleMs()).toBeLessThan(1000);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+});

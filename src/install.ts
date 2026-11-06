@@ -115,7 +115,8 @@ async function shortcut(): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
   if (process.platform === 'win32') {
     const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
-    const ps = `$s=(New-Object -ComObject WScript.Shell).CreateShortcut(${q(file)});$s.TargetPath=${q(self.command)};$s.Arguments=${q(args.map((a) => `"${a}"`).join(' '))};$s.WorkingDirectory=${q(os.homedir())};$s.Description='TutorDesk';$s.Save()`;
+    // WindowStyle 7: start minimized, so the moment the program needs to hand the desk off is not a flashing window.
+    const ps = `$s=(New-Object -ComObject WScript.Shell).CreateShortcut(${q(file)});$s.TargetPath=${q(self.command)};$s.Arguments=${q(args.map((a) => `"${a}"`).join(' '))};$s.WorkingDirectory=${q(os.homedir())};$s.Description='TutorDesk';$s.WindowStyle=7;$s.Save()`;
     const r = await run('powershell', ['-NoProfile', '-Command', ps], { cwd: os.homedir(), timeoutMs: 20_000 });
     if (r.code !== 0) throw new Error(`Could not create the desktop shortcut: ${r.output.trim()}`);
   } else if (process.platform === 'darwin') {

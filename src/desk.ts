@@ -8,6 +8,7 @@ import { parse } from 'yaml';
 import { esc, markdown } from './md.ts';
 import { exists } from './proc.ts';
 import { buildShare } from './share.ts';
+import { selfCommand } from './paths.ts';
 import { TEMPLATES } from './tex.ts';
 import { ID, LESSON_STATUS, listStudents, readStudent, setLessonStatus, studentsDir, type Lesson, type LessonStatus, type Student } from './workspace.ts';
 
@@ -232,12 +233,15 @@ export interface Desk {
   handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
   /** Tell open pages to reload. */
   changed(): void;
+  /** How long nobody has looked: 0 while a page is open. */
+  idleMs(): number;
 }
 
 export function createDesk(root: string, opts: { lang?: Lang; now?: () => Date } = {}): Desk {
   const token = randomBytes(16).toString('hex');
   const now = opts.now ?? (() => new Date());
   const clients = new Set<ServerResponse>();
+  let lastSeen = Date.now();
 
   async function config(): Promise<{ lang: Lang; studio?: string }> {
     const c = ((await readFile(path.join(root, 'tutordesk.yaml'), 'utf8').then(parse, () => null)) ?? {}) as { language?: string; studio?: string };
@@ -409,6 +413,7 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    lastSeen = Date.now();
     // Only this computer: refuse other host names, which is how a web page could reach a local server.
     if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(req.headers.host ?? '')) {
       res.writeHead(403).end();
@@ -426,7 +431,10 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
         res.write(': ok\n\n');
         clients.add(res);
-        req.on('close', () => clients.delete(res));
+        req.on('close', () => {
+          clients.delete(res);
+          lastSeen = Date.now();
+        });
         return;
       }
       if (req.method === 'POST') {
@@ -477,6 +485,7 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
     changed: () => {
       for (const c of clients) c.write('data: changed\n\n');
     },
+    idleMs: () => (clients.size ? 0 : Date.now() - lastSeen),
   };
 }
 
@@ -497,7 +506,7 @@ async function runningDesk(root: string, port: number): Promise<string | null> {
  * Serve the desk for a workspace on this computer only, reloading pages when files change. If a desk
  * for the same workspace is already up, that one is used. Returns its address.
  */
-export async function startDesk(root: string, o: { port?: number; background?: boolean } = {}): Promise<string> {
+export async function startDesk(root: string, o: { port?: number; background?: boolean; /** Quit after this long with no page open. */ idleExitMs?: number } = {}): Promise<string> {
   const port = o.port ?? DESK_PORT;
   for (let p = port; p < port + 20; p++) {
     const existing = await runningDesk(root, p);
@@ -520,7 +529,35 @@ export async function startDesk(root: string, o: { port?: number; background?: b
     timer = setTimeout(desk.changed, 300);
   });
   if (o.background) watcher.unref();
+  if (o.idleExitMs) {
+    const limit = o.idleExitMs;
+    setInterval(() => desk.idleMs() > limit && process.exit(0), Math.min(60_000, limit)).unref();
+  }
   return `http://127.0.0.1:${actual}/`;
+}
+
+/**
+ * The desk as its own quiet process (the desktop shortcut): no window, it outlives this command and
+ * quits after half an hour with no page open. An agent's or an earlier desk for the workspace is reused.
+ */
+export async function startDetachedDesk(root: string, port = DESK_PORT): Promise<string> {
+  const find = async () => {
+    for (let p = port; p < port + 20; p++) {
+      const url = await runningDesk(root, p);
+      if (url) return url;
+    }
+    return null;
+  };
+  const running = await find();
+  if (running) return running;
+  const self = selfCommand();
+  spawn(self.command, [...self.args, 'desk', root, '--port', String(port)], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    const url = await find();
+    if (url) return url;
+  }
+  throw new Error('The desk did not start.');
 }
 
 export function openBrowser(url: string): void {

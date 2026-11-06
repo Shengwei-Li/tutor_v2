@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { openBrowser, startDesk } from './desk.ts';
+import { openBrowser, startDesk, startDetachedDesk } from './desk.ts';
 import { findWorkspace } from './home.ts';
 import { init } from './init.ts';
 import { install, needsInstall, uninstall } from './install.ts';
@@ -21,7 +21,7 @@ agent (Codex, Claude Code, OpenCode) does the rest. These commands are for setti
   tutordesk init <folder>     development: a workspace that carries its own skills and agent config
   tutordesk mcp               the MCP server agents start (never run by hand)
 
-Options: --studio, --tutor, --no-codex (init); --port, --no-browser (open)`;
+Options: --studio, --tutor, --no-codex (init); --port, --no-browser, --foreground (open: keep the desk in this window)`;
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -32,6 +32,7 @@ const { values, positionals } = parseArgs({
     'no-codex': { type: 'boolean' },
     port: { type: 'string' },
     'no-browser': { type: 'boolean' },
+    foreground: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
   },
 });
@@ -46,16 +47,29 @@ async function main(): Promise<void> {
       process.exitCode = 1;
       return;
     }
-    const url = await startDesk(root, { port: values.port ? Number(values.port) : undefined });
-    console.log(`TutorDesk desk: ${url}  (keep this window open while you use it)`);
+    const port = values.port ? Number(values.port) : undefined;
+    // Normally the desk runs on its own, without a window; --foreground keeps it here (development).
+    const url = values.foreground ? await startDesk(root, { port }) : await startDetachedDesk(root, port);
+    console.log(`TutorDesk desk: ${url}${values.foreground ? '  (Ctrl+C to stop)' : ''}`);
     if (!values['no-browser']) openBrowser(url);
   }
 
   switch (values.help ? 'help' : command) {
     case 'install': {
       const workspace = await install();
-      console.log(`\nTutorDesk is ready. Open your agent (Codex, Claude Code or OpenCode) and say hello to your first student.`);
       await openDesk(workspace);
+      console.log(`\nTutorDesk is ready. Open your agent (Codex, Claude Code or OpenCode) and say hello to your first student.`);
+      // Double-clicked: leave the message up long enough to read, then close the window.
+      if (SEA && !given) {
+        console.log('This window closes in 15 seconds.');
+        await new Promise((r) => setTimeout(r, 15_000));
+      }
+      break;
+    }
+    case 'desk': {
+      // The background desk process startDetachedDesk starts; it quits after 30 minutes with no page open.
+      if (!folder) throw new Error('desk needs a workspace folder.');
+      await startDesk(path.resolve(folder), { port: values.port ? Number(values.port) : undefined, idleExitMs: 30 * 60_000 });
       break;
     }
     case 'uninstall':
