@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -140,6 +140,26 @@ describe('OpenCode (ACP)', () => {
     expect(events).toContainEqual({ type: 'text', delta: 'picked=a1' });
     expect(events.some((e) => e.type === 'text' && e.delta === 'old history')).toBe(false);
   });
+
+  it('maps its plan, and sends pictures as image blocks only when it takes them', async () => {
+    const pic = path.join(tmp, 'essay.png');
+    await writeFile(pic, 'png bytes');
+    const image = { path: pic, mime: 'image/png' as const, bytes: 9 };
+    const plain = new AcpSession(opts(), fake('acp'));
+    sessions.push(plain);
+    await plain.start();
+    const events = await collect(plain.send('plan please', [image]));
+    expect(events).toContainEqual({ type: 'plan', items: [{ text: 'Read the essay', status: 'active' }, { text: 'Mark it', status: 'pending' }] });
+    const seeing = new AcpSession(opts({ env: { FAKE_LOG: log, FAKE_ACP_IMAGE: '1' } }), fake('acp'));
+    sessions.push(seeing);
+    await seeing.start();
+    await collect(seeing.send('Mark it', [image]));
+    const prompts = (await sent()).filter((m) => m.method === 'session/prompt').map((m) => (m.params!.prompt as { type: string }[]).map((b) => b.type));
+    expect(prompts).toEqual([
+      ['text', 'text'],
+      ['text', 'image', 'text'],
+    ]);
+  });
 });
 
 describe('Codex model fallback', () => {
@@ -150,5 +170,16 @@ describe('Codex model fallback', () => {
     const events = await collect(s.send('Plan the lesson'));
     expect(events[0]).toMatchObject({ type: 'session', model: 'gpt-fast' });
     expect((await sent()).find((m) => m.method === 'turn/start')!.params).toMatchObject({ model: 'gpt-fast' });
+  });
+
+  it('maps its plan updates, and a stop pressed before Codex names the turn still stops it', async () => {
+    const s = new CodexSession(opts(), fake('codex'));
+    sessions.push(s);
+    await s.start();
+    const events = await collect(s.send('plan please'));
+    expect(events.filter((e) => e.type === 'plan').at(-1)).toEqual({ type: 'plan', items: [{ text: 'Read the profile', status: 'done' }, { text: 'Write the plan', status: 'done' }] });
+    const turn = collect(s.send('hang'));
+    await s.interrupt();
+    expect((await turn).at(-1)).toMatchObject({ type: 'turn_end', status: 'interrupted' });
   });
 });

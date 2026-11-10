@@ -1,9 +1,22 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import type { ContentBlock, InitializeResponse, LoadSessionResponse, NewSessionResponse, PermissionOption, PromptResponse, RequestPermissionRequest, RequestPermissionResponse, SessionConfigOption, SessionNotification, ToolKind } from '@agentclientprotocol/sdk';
+import { readFile } from 'node:fs/promises';
+import type {
+  ContentBlock,
+  InitializeResponse,
+  LoadSessionResponse,
+  NewSessionResponse,
+  PermissionOption,
+  PromptResponse,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+  SessionConfigOption,
+  SessionNotification,
+  ToolKind,
+} from '@agentclientprotocol/sdk';
 import { program, stopProcess, type Program } from '../proc.ts';
 import { JsonRpcPeer, RpcError } from './jsonrpc.ts';
 import { BaseSession, agentEnv, allowed, splitToolName, type ActionKind } from './session-base.ts';
-import type { SessionStart } from './types.ts';
+import { IMAGE_INPUT_MAX, type Image, type SessionStart, type ToolKind as ToolKind_ } from './types.ts';
 
 /**
  * The tool's kind decides first: a title is free text the agent can shape, so a shell command whose
@@ -28,6 +41,8 @@ export function classify(kind: ToolKind | null | undefined, title: string): Acti
   }
 }
 
+const toolKind = (k: ActionKind): ToolKind_ => (k === 'network' ? 'other' : k);
+
 /** OpenCode's own permission rules for this conversation: edit files, no commands, no web. */
 export const OPENCODE_PERMISSIONS = JSON.stringify({ permission: { edit: 'allow', bash: 'deny', webfetch: 'deny' } });
 
@@ -42,6 +57,7 @@ export class AcpSession extends BaseSession {
   /** session/load replays history as updates; those are not part of the current turn. */
   private loading = false;
   private toolTitles = new Map<string, string>();
+  private toolKinds = new Map<string, ToolKind_>();
   private sentFirst = false;
   /** The agent loaded an earlier session (it may not support loading, and then starts afresh). */
   private resumed = false;
@@ -99,6 +115,7 @@ export class AcpSession extends BaseSession {
       this.nativeId = r.sessionId;
       options = r.configOptions ?? undefined;
     }
+    this.takesImages = caps.agentCapabilities?.promptCapabilities?.image === true;
     // ACP has no model parameter: the agent offers it as a session config option of category "model".
     if (this.opts.model) {
       const option = options?.find((o) => o.category === 'model');
@@ -106,14 +123,17 @@ export class AcpSession extends BaseSession {
         await peer.request('session/set_config_option', { sessionId: this.nativeId, configId: option?.id ?? 'model', value: this.opts.model });
       }
     }
+    // OpenCode's thinking levels are known only inside a session, so the desk offers none for it.
   }
+  private takesImages = false;
 
-  protected async beginTurn(text: string): Promise<void> {
+  protected async beginTurn(text: string, images: Image[]): Promise<void> {
     if (!this.peer || !this.nativeId) throw new Error('Session not started');
     const prompt: ContentBlock[] = [];
     // ACP has no system prompt; the conversation's instructions ride on its first message.
     if (this.opts.instructions && !this.resumed && !this.sentFirst) prompt.push({ type: 'text', text: `${this.opts.instructions}\n\n---\n\n` });
     this.sentFirst = true;
+    if (this.takesImages) for (const i of images.filter((x) => x.bytes <= IMAGE_INPUT_MAX)) prompt.push({ type: 'image', mimeType: i.mime, data: (await readFile(i.path)).toString('base64') });
     prompt.push({ type: 'text', text });
     const r = await this.peer.request<PromptResponse>('session/prompt', { sessionId: this.nativeId, prompt });
     if (r.stopReason === 'cancelled') this.endTurn('interrupted');
@@ -128,17 +148,26 @@ export class AcpSession extends BaseSession {
       case 'agent_message_chunk':
         if (u.content.type === 'text') this.emit({ type: 'text', delta: u.content.text });
         return;
-      case 'tool_call':
+      case 'tool_call': {
         this.toolTitles.set(u.toolCallId, u.title);
-        this.emit({ type: 'tool', id: u.toolCallId, ...splitToolName(u.title), input: u.rawInput, status: u.status === 'failed' ? 'error' : u.status === 'completed' ? 'ok' : 'running' });
+        const kind = toolKind(classify(u.kind, u.title));
+        this.toolKinds.set(u.toolCallId, kind);
+        // The file it names, when the input does not say.
+        const where = u.locations?.[0]?.path;
+        const input = u.rawInput ?? (where ? { path: where } : undefined);
+        this.emit({ type: 'tool', id: u.toolCallId, ...splitToolName(u.title), kind, input, status: u.status === 'failed' ? 'error' : u.status === 'completed' ? 'ok' : 'running' });
         return;
+      }
       case 'tool_call_update': {
         if (u.status !== 'completed' && u.status !== 'failed') return;
         const raw = u.title ?? this.toolTitles.get(u.toolCallId) ?? 'tool';
         const text = (u.content ?? []).map((c) => (c.type === 'content' && c.content.type === 'text' ? c.content.text : '')).join(' ').slice(0, 400);
-        this.emit({ type: 'tool', id: u.toolCallId, ...splitToolName(raw), status: u.status === 'failed' ? 'error' : 'ok', summary: text || undefined });
+        this.emit({ type: 'tool', id: u.toolCallId, ...splitToolName(raw), kind: this.toolKinds.get(u.toolCallId), status: u.status === 'failed' ? 'error' : 'ok', summary: text || undefined });
         return;
       }
+      case 'plan':
+        this.emit({ type: 'plan', items: u.entries.map((x) => ({ text: x.content, status: x.status === 'completed' ? 'done' : x.status === 'in_progress' ? 'active' : 'pending' })) });
+        return;
       default:
         return;
     }

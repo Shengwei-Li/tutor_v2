@@ -19,16 +19,29 @@ export interface SessionStart {
   resume?: string;
   /** Omit to use the agent's own default model. */
   model?: string;
+  /** The agent's own name for how hard to think (Codex "low", Claude "high"…); omit for its default. */
+  effort?: string;
   /** Added to the agent's instructions: where it is and which student this conversation is about. */
   instructions?: string;
   mcp: McpLaunch;
   env?: NodeJS.ProcessEnv;
 }
 
+/** A step of the agent's own task list. */
+export interface PlanItem {
+  text: string;
+  status: 'pending' | 'active' | 'done';
+}
+
+/** What a tool call does, as far as the tutor cares: reads, writes, a tutordesk tool, or something else. */
+export type ToolKind = 'read' | 'edit' | 'toolbox' | 'command' | 'other';
+
 export type AgentEvent =
   | { type: 'session'; nativeId: string; model?: string }
   | { type: 'text'; delta: string }
-  | { type: 'tool'; id: string; server?: string; name: string; input?: unknown; status: 'running' | 'ok' | 'error'; summary?: string }
+  | { type: 'tool'; id: string; server?: string; name: string; kind?: ToolKind; input?: unknown; status: 'running' | 'ok' | 'error'; summary?: string }
+  /** The agent's task list for this turn, whole each time (it replaces the last one). */
+  | { type: 'plan'; items: PlanItem[] }
   | { type: 'notice'; message: string }
   | { type: 'turn_end'; status: 'completed' | 'interrupted' | 'failed'; error?: string };
 
@@ -41,11 +54,22 @@ export interface AgentSession {
   /** A turn has completed in this session (so the native id it resumed is valid). */
   readonly proven: boolean;
   start(): Promise<void>;
-  /** One turn. Events stream until a `turn_end`; only one turn runs at a time. */
-  send(text: string): AsyncIterable<AgentEvent>;
+  /** One turn. Events stream until a `turn_end`; only one turn runs at a time. Images go as the agent's own image input where it takes one. */
+  send(text: string, images?: Image[]): AsyncIterable<AgentEvent>;
   interrupt(): Promise<void>;
   close(): Promise<void>;
 }
+
+/** A picture the tutor attached, saved in the workspace. The message text names it too. */
+export interface Image {
+  /** Absolute path. */
+  path: string;
+  mime: 'image/png' | 'image/jpeg' | 'image/webp';
+  bytes: number;
+}
+
+/** Largest picture sent as image input; bigger ones the agent opens from the path itself. */
+export const IMAGE_INPUT_MAX = 3_750_000;
 
 export interface AgentStatus {
   id: AgentId;

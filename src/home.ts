@@ -16,6 +16,22 @@ interface HomeConfig {
   workspace?: string;
   /** The agent the tutor picked on the desk. */
   agent?: string;
+  /** Per agent, the model and thinking level picked on the desk; absent means the agent's own default. */
+  choices?: Record<string, Choice>;
+}
+
+export interface Choice {
+  model?: string;
+  effort?: 'fast' | 'deep';
+}
+
+/** Only for conversations TutorDesk starts: the agent's own settings are not touched. */
+export async function rememberChoice(agent: string, choice: Choice): Promise<void> {
+  const home = await readHome();
+  const clean: Choice = {};
+  if (choice.model) clean.model = choice.model;
+  if (choice.effort === 'fast' || choice.effort === 'deep') clean.effort = choice.effort;
+  await writeAtomic(configFile(), `${JSON.stringify({ ...home, agent, choices: { ...home.choices, [agent]: clean } }, null, 2)}\n`);
 }
 
 const configFile = () => path.join(tutordeskHome(), 'config.json');

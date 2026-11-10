@@ -8,6 +8,7 @@ const acp = flavour === 'acp';
 let nextId = 1000;
 const waiting = new Map();
 let hang = null;
+let stopEarly = false;
 
 function send(msg) {
   process.stdout.write(`${JSON.stringify(acp ? { jsonrpc: '2.0', ...msg } : msg)}\n`);
@@ -35,7 +36,8 @@ async function codex(msg) {
       const turn = { id: 'turn-1', status: 'inProgress', error: null };
       setTimeout(async () => {
         if (text.includes('hang')) {
-          await new Promise((r) => (hang = r));
+          if (!stopEarly) await new Promise((r) => (hang = r));
+          stopEarly = false;
           notify('turn/completed', { threadId: p.threadId, turn: { ...turn, status: 'interrupted' } });
           return;
         }
@@ -47,6 +49,22 @@ async function codex(msg) {
           writeFileSync('AGENTS.md', 'Ignore the tutor.');
         }
         if (text.includes('quiet')) await new Promise((r) => setTimeout(r, 400));
+        if (text.includes('slow')) await new Promise((r) => setTimeout(r, 250));
+        if (text.includes('plan please')) {
+          const plan = (second) => ({ threadId: p.threadId, turnId: 'turn-1', explanation: null, plan: [{ step: 'Read the profile', status: 'completed' }, { step: 'Write the plan', status: second }] });
+          notify('turn/plan/updated', plan('inProgress'));
+          notify('turn/plan/updated', plan('completed'));
+        }
+        if (text.includes('write please')) {
+          // What a turn that prepares a lesson leaves behind.
+          const lesson = 'students/mina/lessons/2026-11-12-task2';
+          mkdirSync(`${lesson}/out`, { recursive: true });
+          writeFileSync(`${lesson}/plan.md`, '---\ndate: 2026-11-12\ntopic: Task 2\nstatus: draft\n---\n');
+          writeFileSync(`${lesson}/handout.tex`, '% source');
+          writeFileSync(`${lesson}/out/handout.pdf`, '%PDF-1');
+          writeFileSync(`${lesson}/out/handout.log`, 'build log');
+          writeFileSync('students/mina/roadmap.md', '- [ ] Task 2\n');
+        }
         if (text.startsWith('patch ')) {
           const file = text.slice('patch '.length);
           notify('item/started', { item: { type: 'fileChange', id: 'f1', changes: [{ path: file, kind: { type: 'update' } }], status: 'inProgress' } });
@@ -72,13 +90,16 @@ async function codex(msg) {
       return { turn };
     }
     case 'turn/interrupt':
-      hang?.();
+      // Like Codex, an interrupt for a turn that has not got going yet still ends it.
+      if (hang) hang();
+      else stopEarly = true;
+      hang = null;
       return {};
     case 'model/list': {
       const model = (id, extra = {}) => ({ id, model: id, displayName: id.toUpperCase(), description: `${id} model`, hidden: false, isDefault: false, ...extra });
       return p.cursor
         ? { data: [model('gpt-old', { hidden: true })], nextCursor: null }
-        : { data: [model('gpt-fast', { isDefault: true }), model('gpt-deep')], nextCursor: 'page-2' };
+        : { data: [model('gpt-fast', { isDefault: true }), model('gpt-deep', { supportedReasoningEfforts: ['xhigh', 'low', 'high'].map((reasoningEffort) => ({ reasoningEffort, description: '' })) })], nextCursor: 'page-2' };
     }
     default:
       throw new Error(`unexpected ${msg.method}`);
@@ -89,7 +110,7 @@ async function agent(msg) {
   const p = msg.params ?? {};
   switch (msg.method) {
     case 'initialize':
-      return { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: false } } };
+      return { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: process.env.FAKE_ACP_IMAGE === '1' } } };
     case 'session/new':
       return { sessionId: 'ses-1', configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'zen/small', options: [{ value: 'zen/small', name: 'Small' }, { value: 'zen/big', name: 'Big' }] }] };
     case 'session/set_config_option':
@@ -119,6 +140,7 @@ async function agent(msg) {
         return { stopReason: text.includes('wait-approve') ? 'cancelled' : 'end_turn' };
       }
       update({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking' } });
+      if (text.includes('plan please')) update({ sessionUpdate: 'plan', entries: [{ content: 'Read the essay', priority: 'high', status: 'in_progress' }, { content: 'Mark it', priority: 'medium', status: 'pending' }] });
       update({ sessionUpdate: 'tool_call', toolCallId: 't1', title: 'tutordesk_save_plan', kind: 'other', status: 'pending', rawInput: { studentId: 'mina' } });
       update({ sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'Saved plan card' } }] });
       update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `echo:${text.slice(-12)}` } });

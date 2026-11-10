@@ -219,6 +219,49 @@ describe('desk conversation', () => {
     expect((await thread('')).html).toBe('');
   });
 
+  it('takes attachments into the inbox, passes them on, and shows them as they are', async () => {
+    const t = await token();
+    const up = (name: string, data: Buffer | string, tok = t) => fetch(`${base}/api/upload?key=wang-yiran&name=${encodeURIComponent(name)}`, { method: 'POST', headers: { origin: base, 'x-td-token': tok }, body: data });
+    expect((await up('essay.jpg', 'x', 'bad')).status).toBe(403);
+    expect((await up('run.exe', 'x')).status).toBe(415);
+    expect((await up('big.png', Buffer.alloc(20 * 1024 * 1024 + 1))).status).toBe(413);
+    const r = await up('Essay 1.jpg', 'jpeg bytes');
+    expect(r.status).toBe(200);
+    const { file } = (await r.json()) as { file: string };
+    expect(file).toBe('students/wang-yiran/inbox/2026-11-04-Essay-1.jpg');
+    const send = (files: unknown) => fetch(`${base}/api/send`, { method: 'POST', headers: { origin: base }, body: JSON.stringify({ token: t, key: 'wang-yiran', text: 'Mark it', files }) });
+    expect((await send(['students/wang-yiran/notes.md'])).status).toBe(409);
+    expect((await send([file])).status).toBe(200);
+    const v = await settled('wang-yiran');
+    expect(v.html).toContain(`<img class="thumb" src="/files/${file}"`);
+    const img = await fetch(`${base}/files/${file}`);
+    expect(img.headers.get('content-type')).toBe('image/jpeg');
+    expect(img.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(img.headers.get('content-security-policy')).toMatch(/^sandbox/);
+    expect(await img.text()).toBe('jpeg bytes');
+    expect((await fetch(`${base}/files/students/wang-yiran/inbox/..%2Fnotes.md`)).status).toBe(404);
+  });
+
+  it('hands every task the agent can do alone to its conversation, once', async () => {
+    const t = await token();
+    const all = () => fetch(`${base}/api/all`, { method: 'POST', headers: { origin: base }, body: JSON.stringify({ token: t }) }).then((r) => r.json() as Promise<{ sent: number }>);
+    expect(await all()).toEqual({ sent: 1 });
+    expect(await all()).toEqual({ sent: 0 });
+    const v = await settled('wang-yiran');
+    expect(v.html.match(/Prepare Wang Yiran&#39;s lesson on 11\/10\./g) ?? v.html.match(/Prepare Wang Yiran's lesson on 11\/10\./g)).toHaveLength(1);
+    // The approval stays the tutor's.
+    expect(await approval(root, 'wang-yiran', '2026-11-05-position')).toBe('none');
+  });
+
+  it("remembers the model and thinking level per agent, for the desk's own conversations", async () => {
+    const t = await token();
+    const choose = (body: object) => fetch(`${base}/api/choice`, { method: 'POST', headers: { origin: base }, body: JSON.stringify({ token: t, ...body }) });
+    expect((await choose({ agent: 'codex', model: 'gpt-deep', effort: 'deep' })).status).toBe(200);
+    expect((await choose({ agent: 'nope', model: 'x' })).status).toBe(404);
+    const v = (await thread('')) as unknown as { agents: { id: string; choice: object }[] };
+    expect(v.agents.find((a) => a.id === 'codex')!.choice).toEqual({ model: 'gpt-deep', effort: 'deep' });
+  });
+
   it('records the approval and hands the materials to the agent in one click', async () => {
     const url = `${base}/s/wang-yiran/l/2026-11-05-position/approve`;
     expect((await fetch(url, { method: 'POST', headers: { origin: base }, body: new URLSearchParams({ token: await token() }), redirect: 'manual' })).status).toBe(303);

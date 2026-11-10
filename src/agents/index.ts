@@ -5,7 +5,8 @@ import { ClaudeCodeSession, claudeEnv } from './claude.ts';
 import { CodexSession } from './codex.ts';
 import type { AgentId, AgentSession, AgentStatus, SessionStart } from './types.ts';
 
-export type { AgentEvent, AgentId, AgentSession, AgentStatus, McpLaunch, SessionStart } from './types.ts';
+export type { AgentEvent, AgentId, AgentSession, AgentStatus, Image, McpLaunch, PlanItem, SessionStart, ToolKind } from './types.ts';
+export { listModels, nativeEffort, type Effort, type ModelChoice, type ModelList } from './models.ts';
 
 export const AGENTS: { id: AgentId; label: string; program: string; signIn: string; install: string }[] = [
   { id: 'codex', label: 'Codex', program: 'codex', signIn: 'codex login', install: 'https://developers.openai.com/codex' },

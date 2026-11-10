@@ -1,9 +1,12 @@
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { query, type CanUseTool, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query, type CanUseTool, type EffortLevel, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { findProgram } from '../proc.ts';
 import { AsyncQueue, BaseSession, DENIED, allowed, splitToolName, type ActionKind } from './session-base.ts';
-import type { SessionStart } from './types.ts';
+import { IMAGE_INPUT_MAX, type Image, type SessionStart } from './types.ts';
+
+type MessageParam = SDKUserMessage['message'];
 
 /** Variables that make a nested CLI think it runs inside another Claude Code session. */
 const NESTING_VARS = ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SSE_PORT'];
@@ -59,6 +62,7 @@ export class ClaudeCodeSession extends BaseSession {
   private abort = new AbortController();
   private interrupted = false;
   private tools = new Map<string, string>();
+  private hidden = new Set<string>();
 
   constructor(opts: SessionStart) {
     super(opts);
@@ -74,6 +78,7 @@ export class ClaudeCodeSession extends BaseSession {
         cwd: this.opts.cwd,
         resume: this.opts.resume,
         model: this.opts.model,
+        ...(this.opts.effort ? { effort: this.opts.effort as EffortLevel } : {}),
         pathToClaudeCodeExecutable: await claudeExecutable(),
         env: claudeEnv(this.opts.env),
         abortController: this.abort,
@@ -96,10 +101,17 @@ export class ClaudeCodeSession extends BaseSession {
     return { behavior: 'deny', message: DENIED };
   };
 
-  protected async beginTurn(text: string): Promise<void> {
+  protected async beginTurn(text: string, images: Image[]): Promise<void> {
     if (!this.q) throw new Error('Session not started');
     this.interrupted = false;
-    this.input.push({ type: 'user', message: { role: 'user', content: [{ type: 'text', text }] }, parent_tool_use_id: null });
+    // Messages API content blocks (the SDK's types for them are not installed here).
+    const content: unknown[] = [];
+    // Pictures small enough go in the message; Claude opens bigger ones from their path with Read.
+    for (const i of images.filter((x) => x.bytes <= IMAGE_INPUT_MAX)) {
+      content.push({ type: 'image', source: { type: 'base64', media_type: i.mime, data: (await readFile(i.path)).toString('base64') } });
+    }
+    content.push({ type: 'text', text });
+    this.input.push({ type: 'user', message: { role: 'user', content } as MessageParam, parent_tool_use_id: null });
   }
 
   private async pump(q: Query): Promise<void> {
@@ -130,8 +142,16 @@ export class ClaudeCodeSession extends BaseSession {
         if (m.parent_tool_use_id) return;
         for (const block of m.message.content) {
           if (block.type !== 'tool_use') continue;
+          // Its task list is the plan the desk shows, not a step.
+          if (block.name === 'TodoWrite') {
+            const todos = (block.input as { todos?: { content?: string; activeForm?: string; status?: string }[] }).todos ?? [];
+            this.emit({ type: 'plan', items: todos.map((x) => ({ text: String(x.content ?? x.activeForm ?? ''), status: x.status === 'completed' ? 'done' : x.status === 'in_progress' ? 'active' : 'pending' })) });
+            this.hidden.add(block.id);
+            continue;
+          }
           this.tools.set(block.id, block.name);
-          this.emit({ type: 'tool', id: block.id, ...splitToolName(block.name), input: block.input, status: 'running' });
+          const kind = classify(block.name);
+          this.emit({ type: 'tool', id: block.id, ...splitToolName(block.name), kind: kind === 'network' ? 'other' : kind, input: block.input, status: 'running' });
         }
         return;
       case 'user': {
@@ -139,9 +159,11 @@ export class ClaudeCodeSession extends BaseSession {
         if (typeof content === 'string') return;
         for (const block of content) {
           if (block.type !== 'tool_result') continue;
+          if (this.hidden.delete(block.tool_use_id)) continue;
           const name = this.tools.get(block.tool_use_id) ?? 'tool';
           this.tools.delete(block.tool_use_id);
-          this.emit({ type: 'tool', id: block.tool_use_id, ...splitToolName(name), status: block.is_error === true ? 'error' : 'ok', summary: summarise(block.content) });
+          const kind = classify(name);
+          this.emit({ type: 'tool', id: block.tool_use_id, ...splitToolName(name), kind: kind === 'network' ? 'other' : kind, status: block.is_error === true ? 'error' : 'ok', summary: summarise(block.content) });
         }
         return;
       }

@@ -1,5 +1,5 @@
 import { insideRoot, protectedPart } from '../files.ts';
-import type { AgentEvent, AgentId, AgentSession, SessionStart } from './types.ts';
+import type { AgentEvent, AgentId, AgentSession, Image, SessionStart } from './types.ts';
 
 /** A push-based async iterable: producers push, one consumer iterates until end(). */
 export class AsyncQueue<T> implements AsyncIterable<T> {
@@ -85,7 +85,7 @@ export abstract class BaseSession implements AgentSession {
   }
 
   abstract start(): Promise<void>;
-  protected abstract beginTurn(text: string): Promise<void>;
+  protected abstract beginTurn(text: string, images: Image[]): Promise<void>;
   abstract interrupt(): Promise<void>;
   abstract close(): Promise<void>;
 
@@ -107,13 +107,13 @@ export abstract class BaseSession implements AgentSession {
     this.endTurn('failed', reason);
   }
 
-  send(text: string): AsyncIterable<AgentEvent> {
+  send(text: string, images: Image[] = []): AsyncIterable<AgentEvent> {
     if (this.isDead) throw new Error('The agent has stopped; send the message again to restart it.');
     if (this.turn) throw new Error('The agent is still working on the previous message.');
     const q = new AsyncQueue<AgentEvent>();
     this.turn = q;
     if (this.nativeId && !this.announced) this.announce(this.nativeId);
-    this.beginTurn(text).catch((e: unknown) => this.endTurn('failed', (e as Error).message));
+    this.beginTurn(text, images).catch((e: unknown) => this.endTurn('failed', (e as Error).message));
     return q;
   }
 

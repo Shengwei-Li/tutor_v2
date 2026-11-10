@@ -150,6 +150,21 @@ export async function readJson<T>(file: string): Promise<T | undefined> {
   }
 }
 
+/** Size and modification time of every file under a folder: compared after a turn, it says what the agent wrote. */
+export async function stamps(dir: string): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  for (const f of await walk(dir)) {
+    const s = await stat(path.join(dir, f)).catch(() => null);
+    if (s) out.set(f, `${s.size}:${s.mtimeMs}`);
+  }
+  return out;
+}
+
+/** Files new or changed since `before`. */
+export function changedSince(before: Map<string, string>, now: Map<string, string>): string[] {
+  return [...now].filter(([f, v]) => before.get(f) !== v).map(([f]) => f);
+}
+
 /** Every file under a folder, relative to it, with forward slashes. */
 export async function walk(dir: string, prefix = ''): Promise<string[]> {
   const out: string[] = [];

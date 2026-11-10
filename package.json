@@ -1,6 +1,6 @@
 {
   "name": "tutordesk",
-  "version": "2.2.0-dev",
+  "version": "2.3.0-dev",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.11.0",

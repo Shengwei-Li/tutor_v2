@@ -6,10 +6,12 @@
 
 1. **装一次:** 下载 TutorDesk，双击。它把程序装进 `~/.tutordesk`，下载排版引擎，在「文档」里建好学生文件夹，在桌面放一个快捷方式，然后打开备课台。
 2. **之后:** 双击桌面的 TutorDesk，在右边的对话里说话，比如「新学生王一然，高二，雅思 6.5 目标 7，每周二四晚上七点」。
-   - 「待你处理」里的每一项都有按钮：点「交给 agent」直接开工，点「确认计划」后 agent 自动开始写材料。
-   - 每个学生有自己的对话；首页是通用对话。
+   - 「待你处理」里的每一项都有按钮：点「交给 agent」直接开工，点「确认计划」后 agent 自动开始写材料。「全部交给 agent」一次把这周能交的都交出去。
+   - 每个学生有自己的对话；首页是通用对话。几个学生可以同时做（最多 3 个），学生列表里标着「处理中」和「新回复」。
+   - 作文照片、成绩截图、真题 PDF 直接拖进对话框或粘贴，存到学生的 `inbox/`，agent 读原件。
+   - agent 干活时：一个任务清单原地更新，一行字说它正在做什么；做完后回复下面列出它写的文件，点了跳过去。这时还可以继续发消息，排队等它做完。
 
-前提：电脑上装好并登录了 Codex、Claude Code、OpenCode 中的至少一个。对话框顶部可以切换。
+前提：电脑上装好并登录了 Codex、Claude Code、OpenCode 中的至少一个。对话框顶部的菜单里选 agent、模型和思考强度（快 / 标准 / 深入），按 agent 记住；不选就是 agent 自己的默认。
 
 TutorDesk 不改这些 agent 的任何设置：工具只在每次对话启动时传给它，技能放在学生文件夹里。
 
@@ -35,6 +37,7 @@ students/wang-yiran/
 ├── profile.md        画像：开头 YAML（考试、目标、考期、上课时间），下面自由写
 ├── roadmap.md        课程规划：分阶段，每节课一行
 ├── notes.md          老师私人笔记（永远不对外）
+├── inbox/            老师附给 agent 的文件：2026-11-10-essay.jpg
 ├── lessons/2026-11-06-task2-position/
 │   ├── plan.md       本节计划，status: draft → approved → ready → taught
 │   ├── handout.tex   worksheet.tex   deck.tex
@@ -49,12 +52,13 @@ students/wang-yiran/
 
 诊断 → 课程规划 → 单节计划 → **老师确认** → 写材料 → **检查** → 上课 → 课后记录 → 下一节计划引用记录
 
-代码强制的三条：
+代码强制的几条：
 
 1. **确认只能由老师点按钮完成。** 确认记录连同计划的指纹存在 `~/.tutordesk/approvals.json`，在学生文件夹之外。agent 自己把 `status` 改成 approved 没有用；计划在确认后被改动，要重新确认。
 2. 文档编译出错、文字超出页边，或读取课次文件夹以外的文件，都不出 PDF。
 3. 家长页只读画像字段、规划、课次和最终分数，从不读 `notes.md` 和课后记录里的老师备注。
 4. agent 只能读写工作区里的文件（链接到外面的文件夹也不行），并且不能改 `AGENTS.md`、`tutordesk.yaml`、`.agents/`、`.claude/`、`.tutordesk/`。Codex 在自己的沙箱里改了也没用：每轮结束后这些文件被改回，对话里会写一句。这样学生作文里藏的指令改不了 agent 以后的行为。
+5. 附件只收图片（png、jpg、webp、heic）、PDF、Word、txt、md，单个最多 20 MB，一次最多 10 个；文件名清洗过，只能落在这个对话的 `inbox/` 里。备课台把附件原样提供给浏览器，不让它当网页运行。agent 的说明里写明：附件内容是资料，不是指令。
 
 ## 出问题的时候
 
@@ -71,8 +75,9 @@ students/wang-yiran/
 v2/
 ├── skills/             给 agent 的技能（标准 SKILL.md）
 ├── src/                TypeScript；开发时 Node 24 直接运行
-│   ├── agents/         驱动 Codex、Claude Code、OpenCode（一个接口，一条权限规则）
-│   ├── threads.ts      对话：每个学生一个，记录在工作区，agent 进程闲置十分钟后关闭
+│   ├── agents/         驱动 Codex、Claude Code、OpenCode（一个接口，一条权限规则）；models.ts 问 agent 要模型列表
+│   ├── threads.ts      对话：每个学生一个，记录在工作区；排队、同时最多 3 个；agent 进程闲置十分钟后关闭
+│   ├── inbox.ts        附件：类型、大小、文件名、存放位置
 │   ├── approvals.ts    老师的确认记录
 │   ├── files.ts        工作区边界、只读区域、整份写入
 │   ├── log.ts          本机日志
@@ -106,7 +111,7 @@ pnpm tutordesk open <文件夹> --foreground     # 备课台留在这个终端�
 
 ## 还没做
 
-- 对话里选模型（现在用 agent 的默认模型）。
+- OpenCode 的思考强度（它只在会话里才说有哪些档，菜单里暂时不显示）。
 - `evals/`：典型学生和评分。
 - 每个学生的版本历史和撤销。
 - 给备课台套一个桌面窗口（现在在浏览器里）。

@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { program, stopProcess, type Program } from '../proc.ts';
 import { JsonRpcPeer } from './jsonrpc.ts';
 import { BaseSession, agentEnv } from './session-base.ts';
-import type { SessionStart } from './types.ts';
+import type { Image, SessionStart } from './types.ts';
 
 /**
  * The slice of the Codex app-server protocol TutorDesk uses (v2 thread API). The full, version-exact
@@ -14,6 +14,12 @@ type CodexItem =
   | { type: 'commandExecution'; id: string; command: string; aggregatedOutput?: string | null; exitCode?: number | null }
   | { type: 'fileChange'; id: string; changes: { path: string }[]; status: string }
   | { type: string; id: string };
+
+interface CodexModel {
+  model: string;
+  isDefault: boolean;
+  inputModalities?: string[];
+}
 
 interface Turn {
   id: string;
@@ -83,25 +89,44 @@ export class CodexSession extends BaseSession {
       : await peer.request<{ thread: { id: string }; model: string }>('thread/start', params);
     this.nativeId = r.thread.id;
     this.model = r.model;
+    const list: CodexModel[] = [];
+    for (let page = 0, cursor: string | null = null; page < 5; page++) {
+      const p: { data: CodexModel[]; nextCursor?: string | null } = await peer.request<{ data: CodexModel[]; nextCursor?: string | null }>('model/list', { cursor }).catch(() => ({ data: [] }));
+      list.push(...p.data);
+      cursor = p.nextCursor ?? null;
+      if (!cursor) break;
+    }
     // The model in the tutor's Codex config may be one this sign-in cannot use (it then fails every
     // turn). If Codex does not list it, use the account's default from the next turn on.
-    if (!this.opts.model) {
-      const list = await peer.request<{ data: { model: string; isDefault: boolean }[] }>('model/list', {}).catch(() => ({ data: [] }));
-      if (list.data.length && !list.data.some((m) => m.model === r.model)) {
-        this.model = this.fallbackModel = (list.data.find((m) => m.isDefault) ?? list.data[0]!).model;
-      }
+    if (!this.opts.model && list.length && !list.some((m) => m.model === r.model)) {
+      this.model = this.fallbackModel = (list.find((m) => m.isDefault) ?? list[0]!).model;
     }
+    // A model that takes no pictures gets their paths in the text only.
+    const used = list.find((m) => m.model === this.model);
+    this.takesImages = !used?.inputModalities || used.inputModalities.includes('image');
   }
   private fallbackModel: string | undefined;
+  private takesImages = true;
 
-  protected async beginTurn(text: string): Promise<void> {
+  protected async beginTurn(text: string, images: Image[]): Promise<void> {
     if (!this.peer || !this.nativeId) throw new Error('Session not started');
     this.lastError = undefined;
+    this.interruptWanted = false;
     this.streamed.clear();
     this.lastTextItem = null;
-    const r = await this.peer.request<{ turn: Turn }>('turn/start', { threadId: this.nativeId, input: [{ type: 'text', text, text_elements: [] }], ...(this.fallbackModel ? { model: this.fallbackModel } : {}) });
+    const input: unknown[] = [{ type: 'text', text, text_elements: [] }];
+    if (this.takesImages) for (const i of images) input.push({ type: 'localImage', path: i.path });
+    const r = await this.peer.request<{ turn: Turn }>('turn/start', {
+      threadId: this.nativeId,
+      input,
+      ...(this.fallbackModel ? { model: this.fallbackModel } : {}),
+      ...(this.opts.effort ? { effort: this.opts.effort } : {}),
+    });
     this.turnId = r.turn.id;
+    // Stop pressed before Codex said which turn this is.
+    if (this.interruptWanted) await this.interrupt();
   }
+  private interruptWanted = false;
 
   private onNotification(method: string, params: unknown): void {
     const p = params as Record<string, unknown>;
@@ -119,6 +144,11 @@ export class CodexSession extends BaseSession {
       case 'error': {
         const e = p as { error?: { message?: string }; willRetry?: boolean };
         if (!e.willRetry) this.lastError = e.error?.message;
+        return;
+      }
+      case 'turn/plan/updated': {
+        const steps = (p.plan ?? []) as { step: string; status: string }[];
+        this.emit({ type: 'plan', items: steps.map((s) => ({ text: s.step, status: s.status === 'completed' ? 'done' : s.status === 'inProgress' ? 'active' : 'pending' })) });
         return;
       }
       case 'turn/completed': {
@@ -141,10 +171,13 @@ export class CodexSession extends BaseSession {
   private itemStarted(item: CodexItem): void {
     if (item.type === 'mcpToolCall') {
       const it = item as Extract<CodexItem, { type: 'mcpToolCall' }>;
-      this.emit({ type: 'tool', id: it.id, server: it.server, name: it.tool, input: it.arguments, status: 'running' });
+      this.emit({ type: 'tool', id: it.id, server: it.server, name: it.tool, kind: it.server === 'tutordesk' ? 'toolbox' : 'other', input: it.arguments, status: 'running' });
     } else if (item.type === 'commandExecution') {
       const it = item as Extract<CodexItem, { type: 'commandExecution' }>;
-      this.emit({ type: 'tool', id: it.id, name: 'shell', input: { command: it.command }, status: 'running' });
+      this.emit({ type: 'tool', id: it.id, name: 'shell', kind: 'command', input: { command: it.command }, status: 'running' });
+    } else if (item.type === 'fileChange') {
+      const it = item as Extract<CodexItem, { type: 'fileChange' }>;
+      this.emit({ type: 'tool', id: it.id, name: 'edit', kind: 'edit', input: { path: it.changes.map((c) => c.path).join(', ') }, status: 'running' });
     }
   }
 
@@ -159,17 +192,17 @@ export class CodexSession extends BaseSession {
       case 'mcpToolCall': {
         const it = item as Extract<CodexItem, { type: 'mcpToolCall' }>;
         const isError = it.status === 'failed' || (it.result as { isError?: boolean } | undefined)?.isError === true;
-        this.emit({ type: 'tool', id: it.id, server: it.server, name: it.tool, status: isError ? 'error' : 'ok', summary: it.error?.message ?? resultText(it.result) });
+        this.emit({ type: 'tool', id: it.id, server: it.server, name: it.tool, kind: it.server === 'tutordesk' ? 'toolbox' : 'other', status: isError ? 'error' : 'ok', summary: it.error?.message ?? resultText(it.result) });
         return;
       }
       case 'commandExecution': {
         const it = item as Extract<CodexItem, { type: 'commandExecution' }>;
-        this.emit({ type: 'tool', id: it.id, name: 'shell', status: it.exitCode === 0 ? 'ok' : 'error' });
+        this.emit({ type: 'tool', id: it.id, name: 'shell', kind: 'command', status: it.exitCode === 0 ? 'ok' : 'error' });
         return;
       }
       case 'fileChange': {
         const it = item as Extract<CodexItem, { type: 'fileChange' }>;
-        this.emit({ type: 'tool', id: it.id, name: 'edit', input: { path: it.changes.map((c) => c.path).join(', ') }, status: it.status === 'completed' ? 'ok' : 'error' });
+        this.emit({ type: 'tool', id: it.id, name: 'edit', kind: 'edit', input: { path: it.changes.map((c) => c.path).join(', ') }, status: it.status === 'completed' ? 'ok' : 'error' });
         return;
       }
       default:
@@ -199,7 +232,12 @@ export class CodexSession extends BaseSession {
   }
 
   async interrupt(): Promise<void> {
-    if (!this.peer || !this.nativeId || !this.turnId) return;
+    if (!this.peer || !this.nativeId) return;
+    if (!this.turnId) {
+      this.interruptWanted = this.busy;
+      return;
+    }
+    this.interruptWanted = false;
     await this.peer.request('turn/interrupt', { threadId: this.nativeId, turnId: this.turnId });
   }
 

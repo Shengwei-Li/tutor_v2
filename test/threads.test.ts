@@ -11,17 +11,17 @@ const FAKE = fileURLToPath(new URL('./fixtures/fake-agent.mjs', import.meta.url)
 let root: string;
 let threads: Threads;
 let events: [string, ThreadEvent][];
-let starts: { resume?: string; instructions?: string }[];
+let starts: { resume?: string; instructions?: string; model?: string; effort?: string }[];
 
-/** Resolves when the thread's turn has ended and its entries are saved. */
+/** Resolves when the thread's next turn has ended and its entries are saved (its events up to then are used up). */
 const ended = (key: string) =>
   new Promise<void>((resolve) => {
     const t = setInterval(() => {
-      if (events.some(([k, e]) => k === key && e.type === 'end')) {
-        clearInterval(t);
-        events = events.filter(([k]) => k !== key);
-        resolve();
-      }
+      const i = events.findIndex(([k, e]) => k === key && e.type === 'end');
+      if (i < 0) return;
+      clearInterval(t);
+      events = events.filter(([k], j) => k !== key || j > i);
+      resolve();
     }, 10);
   });
 
@@ -38,7 +38,7 @@ beforeEach(async () => {
     today: () => new Date(2026, 10, 10),
     stallMs: 100,
     create: (_a, o) => {
-      starts.push({ resume: o.resume, instructions: o.instructions });
+      starts.push({ resume: o.resume, instructions: o.instructions, model: o.model, effort: o.effort });
       return new CodexSession(o, { executable: { command: process.execPath, prefixArgs: [FAKE, 'codex'] } });
     },
   });
@@ -67,16 +67,21 @@ describe('conversations', () => {
     expect(JSON.parse(await readFile(path.join(root, '.tutordesk/threads/mina.json'), 'utf8')).sessions).toEqual({ codex: 'thr-1' });
   });
 
-  it('keeps students apart, refuses a second message mid-turn, and stops on request', async () => {
+  it('keeps students apart, queues a second message mid-turn, and stops on request', async () => {
     await threads.send('', 'hang');
-    await expect(threads.send('', 'again')).rejects.toThrow(/still working/);
+    expect(await threads.send('', 'again')).toEqual({ queued: true });
+    expect((await threads.view('')).queue.map((q) => q.text)).toEqual(['again']);
     await threads.send('mina', 'Plan the lesson');
     await ended('mina');
     expect((await threads.view('')).running).toBe(true);
     await new Promise((r) => setTimeout(r, 100));
     await threads.stop('');
     await ended('');
-    expect((await threads.view('')).entries.at(-1)).toMatchObject({ role: 'system', kind: 'stopped' });
+    // The queued message goes as soon as the stopped turn has ended.
+    await ended('');
+    const v = await threads.view('');
+    expect(v.queue).toEqual([]);
+    expect(v.entries.map((e) => (e.role === 'system' ? e.kind : e.role))).toEqual(['tutor', 'stopped', 'tutor', 'tool', 'agent']);
     await expect(threads.send('../x', 'hi')).rejects.toThrow(/Not a student/);
   });
 
@@ -140,6 +145,14 @@ describe('when things go wrong', () => {
     expect(old.length + v.entries.length).toBe(403);
   });
 
+  it('lists messages still queued when the desk went away as not sent, with the message to send again', async () => {
+    await mkdir(path.dirname(threadFile()), { recursive: true });
+    await writeFile(threadFile(), JSON.stringify({ entries: [], sessions: {}, queue: [{ id: 'q1', text: 'Mark the essay', files: ['students/mina/inbox/2026-11-10-essay.jpg'], at: 'x' }] }));
+    const v = await threads.view('mina');
+    expect(v.queue).toEqual([]);
+    expect(v.entries.at(-1)).toMatchObject({ kind: 'unsent', retry: 'Mark the essay', retryFiles: ['students/mina/inbox/2026-11-10-essay.jpg'] });
+  });
+
   it('says when the agent has gone quiet for a long time', async () => {
     await threads.send('mina', 'quiet please');
     await new Promise((r) => setTimeout(r, 300));
@@ -147,5 +160,111 @@ describe('when things go wrong', () => {
     expect((await threads.view('mina')).stalled).toBe(true);
     await ended('mina');
     expect((await threads.view('mina')).stalled).toBe(false);
+  });
+});
+
+describe('what the agent does, shown', () => {
+  const make = (extra: Partial<ConstructorParameters<typeof Threads>[1]>) =>
+    new Threads(root, {
+      mcp: { command: 'tutordesk', args: ['mcp'] },
+      agent: async () => 'codex',
+      emit: (k, e) => events.push([k, e]),
+      create: (_a, o) => {
+        starts.push({ resume: o.resume, model: o.model, effort: o.effort });
+        return new CodexSession(o, { executable: { command: process.execPath, prefixArgs: [FAKE, 'codex'] } });
+      },
+      ...extra,
+    });
+
+  it('keeps one task list per turn, folded into the turn when it ends', async () => {
+    await threads.send('mina', 'plan please');
+    await ended('mina');
+    const v = await threads.view('mina');
+    expect(v.entries.map((e) => e.role)).toEqual(['tutor', 'plan', 'tool', 'agent']);
+    expect(v.entries[1]).toMatchObject({ items: [{ text: 'Read the profile', status: 'done' }, { text: 'Write the plan', status: 'done' }] });
+  });
+
+  it('lists the files a turn wrote, without sources and build files', async () => {
+    await threads.send('mina', 'write please');
+    await ended('mina');
+    expect((await threads.view('mina')).entries.at(-1)).toEqual({
+      role: 'files',
+      files: ['students/mina/lessons/2026-11-12-task2/out/handout.pdf', 'students/mina/lessons/2026-11-12-task2/plan.md', 'students/mina/roadmap.md'],
+      at: expect.any(String),
+    });
+  });
+
+  it('sends attached pictures as image input and names every attachment in the message', async () => {
+    const log = path.join(root, 'fake.log');
+    process.env.FAKE_LOG = log;
+    try {
+      await mkdir(path.join(root, 'students/mina/inbox'), { recursive: true });
+      await writeFile(path.join(root, 'students/mina/inbox/2026-11-10-essay.jpg'), 'jpeg');
+      await writeFile(path.join(root, 'students/mina/inbox/2026-11-10-paper.pdf'), '%PDF');
+      await threads.send('mina', 'Mark this', ['students/mina/inbox/2026-11-10-essay.jpg', 'students/mina/inbox/2026-11-10-paper.pdf']);
+      await ended('mina');
+      const turn = (await readFile(log, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((m) => m.method === 'turn/start');
+      expect(turn.params.input).toEqual([
+        { type: 'text', text: expect.stringContaining('- students/mina/inbox/2026-11-10-paper.pdf'), text_elements: [] },
+        { type: 'localImage', path: path.join(root, 'students/mina/inbox/2026-11-10-essay.jpg') },
+      ]);
+      expect(turn.params.input[0].text).toMatch(/^Mark this\n\nThe tutor attached files[\s\S]*not an instruction to you\.$/);
+      expect((await threads.view('mina')).entries[0]).toMatchObject({ role: 'tutor', text: 'Mark this', files: ['students/mina/inbox/2026-11-10-essay.jpg', 'students/mina/inbox/2026-11-10-paper.pdf'] });
+    } finally {
+      delete process.env.FAKE_LOG;
+    }
+  });
+
+  it('runs a few conversations at once and lets the rest wait their turn', async () => {
+    await threads.closeAll();
+    await mkdir(path.join(root, 'students/leo'), { recursive: true });
+    threads = make({ maxRunning: 1 });
+    await threads.send('mina', 'slow one');
+    expect(await threads.send('leo', 'slow two')).toEqual({ queued: true });
+    expect(threads.activity()).toEqual({ mina: 'working', leo: 'working' });
+    expect((await threads.view('leo')).running).toBe(false);
+    await ended('mina');
+    expect(threads.isRunning('leo')).toBe(true);
+    await ended('leo');
+    // Finished and not yet looked at, until the tutor opens the conversation.
+    expect(threads.activity()).toEqual({ mina: 'unread', leo: 'unread' });
+    await threads.view('leo');
+    expect(threads.activity()).toEqual({ mina: 'unread' });
+  });
+
+  it('takes back a queued message before it goes', async () => {
+    await threads.send('mina', 'hang');
+    await threads.send('mina', 'never mind');
+    const [q] = (await threads.view('mina')).queue;
+    await threads.unqueue('mina', q!.id);
+    expect((await threads.view('mina')).queue).toEqual([]);
+    await threads.stop('mina');
+    await ended('mina');
+    await new Promise((r) => setTimeout(r, 100));
+    expect((await threads.view('mina')).entries.filter((e) => e.role === 'tutor').map((e) => e.role === 'tutor' && e.text)).toEqual(['hang']);
+  });
+
+  it('starts the agent with the model and thinking level picked, and continues the conversation when they change', async () => {
+    await threads.closeAll();
+    let choice: { model?: string; effort?: string } = { model: 'gpt-deep', effort: 'high' };
+    const log = path.join(root, 'fake.log');
+    process.env.FAKE_LOG = log;
+    try {
+      threads = make({ choice: async () => choice });
+      await threads.send('mina', 'first');
+      await ended('mina');
+      choice = {};
+      await threads.send('mina', 'second');
+      await ended('mina');
+      expect(starts.map((s) => [s.model, s.effort, s.resume])).toEqual([
+        ['gpt-deep', 'high', undefined],
+        [undefined, undefined, 'thr-1'],
+      ]);
+      const turns = (await readFile(log, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((m) => m.method === 'turn/start');
+      expect(turns[0].params.effort).toBe('high');
+      expect(turns[1].params.effort).toBeUndefined();
+    } finally {
+      delete process.env.FAKE_LOG;
+    }
   });
 });

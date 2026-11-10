@@ -5,11 +5,12 @@ import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { parse } from 'yaml';
-import { AGENTS, agentStatus, type AgentId, type AgentStatus } from './agents/index.ts';
+import { AGENTS, agentStatus, listModels, nativeEffort, type AgentId, type AgentStatus, type ModelList } from './agents/index.ts';
 import { approval, approve } from './approvals.ts';
 import { CHAT_CSS, CHAT_SCRIPT, chatShell, renderEntries } from './chat.ts';
 import { brokenFiles, insideRoot } from './files.ts';
-import { readHome, rememberAgent } from './home.ts';
+import { readHome, rememberChoice } from './home.ts';
+import { INBOX_MAX_BYTES, INBOX_MAX_FILES, INBOX_TYPES, checkAttachments, cleanName, refuse, saveUpload, typeOf } from './inbox.ts';
 import { log, logError, tail } from './log.ts';
 import { mcpCommand, setupWorkspace } from './init.ts';
 import { esc, markdown } from './md.ts';
@@ -44,9 +45,16 @@ const T = {
     chat: {
       general: 'General', signIn: 'not signed in', missing: 'not installed', placeholder: 'Tell the agent what to do…', send: 'Send', stop: 'Stop', working: 'Working…',
       noAgent: 'No agent is ready. Install Codex, Claude Code or OpenCode, sign in once, then reload this page.',
-      steps: (n: number) => `${n} step${n === 1 ? '' : 's'} (reading, writing)`,
       tools: { check_workspace: 'Checked the files', export_pdf: 'Exported PDF', share_with_parents: 'Made the parent page', setup_workspace: 'Set up the workspace' } as Record<string, string>,
       retry: 'Try again', older: 'Earlier conversation', stalled: 'No word from the agent for 20 minutes. It may be stuck.',
+      details: (n: number, errors: number) => `Details · ${n} step${n === 1 ? '' : 's'}${errors ? ` · ${errors} failed` : ''}`,
+      planDone: (done: number, total: number) => (done === total ? `Done ${total} step${total === 1 ? '' : 's'}` : `Done ${done} of ${total} steps`),
+      did: { read: 'Read {x}', edit: 'Wrote {x}', command: 'Looked at the files', other: '{x}' },
+      doing: { read: 'Reading {x}', edit: 'Writing {x}', command: 'Looking at the files', export_pdf: 'Making the PDF', check_workspace: 'Checking the files', share_with_parents: 'Making the parent page' } as { read: string; edit: string; command: string } & Record<string, string>,
+      files: { profile: 'Profile', roadmap: 'Course plan', notes: 'Notes', plan: 'Plan', record: 'Lesson record', share: 'Parent page', calendar: 'Calendar file', student: 'student', teacher: 'teacher', kinds: { handout: 'Handout', worksheet: 'Worksheet', script: 'Script', deck: 'Slides' } as Record<string, string> },
+      attach: { button: 'Attach', drop: 'Drop files to attach', uploading: 'Uploading…', type: '{x} cannot be attached. Pictures, PDF, Word, text.', size: '{x} is too large (20 MB at most).', many: '10 files at a time at most.' },
+      queued: 'QUEUED', waiting: 'WAITING', unqueue: 'Take back',
+      menu: { agent: 'AGENT', model: 'MODEL', effort: 'THINKING', byDefault: 'Default', loading: 'Asking the agent…', efforts: { fast: 'Fast', standard: 'Standard', deep: 'Deep' } },
       notes: {
         stopped: 'Stopped.',
         failed: (a: string) => `${a} stopped with an error.`,
@@ -56,8 +64,10 @@ const T = {
         noStart: (a: string) => `${a} did not start.`,
         restarted: (a: string) => `Could not continue the earlier ${a} conversation, so a new one began.`,
         restored: 'The agent changed its own instructions. They were put back:',
+        unsent: 'This message was not sent: the desk closed first.',
       },
     },
+    handAll: 'Hand all to agent', allSent: 'Handed {x} to the agent.', act: { working: 'WORKING', unread: 'NEW REPLY' },
     problem: {
       link: 'Something wrong?', intro: 'Copy this and send it to whoever helps you with TutorDesk. It holds no conversations and no student names.',
       version: 'Version', workspace: 'Workspace', agents: 'Agents', log: 'Recent log', copy: 'Copy', copied: 'Copied', empty: 'Nothing logged yet.',
@@ -84,9 +94,16 @@ const T = {
     chat: {
       general: '通用对话', signIn: '未登录', missing: '未安装', placeholder: '告诉 agent 要做什么…', send: '发送', stop: '停止', working: '正在处理…',
       noAgent: '没有可用的 agent。请安装 Codex、Claude Code 或 OpenCode 并登录一次，然后刷新本页。',
-      steps: (n: number) => `${n} 步（读写文件）`,
       tools: { check_workspace: '检查文件', export_pdf: '导出 PDF', share_with_parents: '生成家长页', setup_workspace: '建立工作区' } as Record<string, string>,
       retry: '重试', older: '更早的对话', stalled: '20 分钟没有动静，可能卡住了。',
+      details: (n: number, errors: number) => `细节 · ${n} 步${errors ? ` · ${errors} 步出错` : ''}`,
+      planDone: (done: number, total: number) => (done === total ? `完成 ${total} 步` : `完成 ${done} / ${total} 步`),
+      did: { read: '读 {x}', edit: '写 {x}', command: '查看文件', other: '{x}' },
+      doing: { read: '正在读 {x}', edit: '正在写 {x}', command: '正在查看文件', export_pdf: '正在生成 PDF', check_workspace: '正在检查文件', share_with_parents: '正在生成家长页' } as { read: string; edit: string; command: string } & Record<string, string>,
+      files: { profile: '画像', roadmap: '课程规划', notes: '笔记', plan: '计划', record: '课后记录', share: '家长页', calendar: '日历文件', student: '学生版', teacher: '教师版', kinds: { handout: '讲义', worksheet: '练习卷', script: '教案', deck: '幻灯片' } as Record<string, string> },
+      attach: { button: '附件', drop: '松开即可附加', uploading: '正在上传…', type: '{x} 不能附加。可以附图片、PDF、Word 和文本。', size: '{x} 太大了（最多 20 MB）。', many: '一次最多 10 个文件。' },
+      queued: '排队中', waiting: '等前面的做完', unqueue: '撤回',
+      menu: { agent: 'AGENT', model: '模型', effort: '思考', byDefault: '默认', loading: '正在问 agent…', efforts: { fast: '快', standard: '标准', deep: '深入' } },
       notes: {
         stopped: '已停止。',
         failed: (a: string) => `${a} 出错停下了。`,
@@ -96,8 +113,10 @@ const T = {
         noStart: (a: string) => `${a} 没能启动。`,
         restarted: (a: string) => `没能接上之前的 ${a} 对话，开了一个新的。`,
         restored: 'agent 改动了自己的说明文件，已经改回：',
+        unsent: '这条消息没来得及发出：备课台先关了。',
       },
     },
+    handAll: '全部交给 agent', allSent: '已交给 agent：{x} 项。', act: { working: '处理中', unread: '新回复' },
     problem: {
       link: '出了问题？', intro: '把下面的内容复制给帮你处理 TutorDesk 的人。里面没有对话内容，也没有学生姓名。',
       version: '版本', workspace: '工作区', agents: 'Agent', log: '最近的日志', copy: '复制', copied: '已复制', empty: '还没有日志。',
@@ -282,7 +301,10 @@ export interface Desk {
   close(): Promise<void>;
 }
 
-export function createDesk(root: string, opts: { lang?: Lang; now?: () => Date; /** Tests: the agents on this computer, and scripted sessions. */ agents?: AgentStatus[]; threads?: Partial<ThreadDeps> } = {}): Desk {
+export function createDesk(
+  root: string,
+  opts: { lang?: Lang; now?: () => Date; /** Tests: the agents on this computer, their models, and scripted sessions. */ agents?: AgentStatus[]; models?: (agent: AgentId) => Promise<ModelList>; threads?: Partial<ThreadDeps> } = {},
+): Desk {
   const token = randomBytes(16).toString('hex');
   const now = opts.now ?? (() => new Date());
   const clients = new Set<ServerResponse>();
@@ -301,12 +323,36 @@ export function createDesk(root: string, opts: { lang?: Lang; now?: () => Date; 
     const chosen = (await readHome()).agent;
     return (list.find((a) => a.id === chosen) ?? list[0])?.id ?? null;
   }
+  // The models each agent offers: asked of the agent itself, then kept for ten minutes.
+  const modelCache = new Map<AgentId, { at: number; list: Promise<ModelList> }>();
+  const modelsOf = (id: AgentId): Promise<ModelList> => {
+    const c = modelCache.get(id);
+    if (c && Date.now() - c.at < 10 * 60_000) return c.list;
+    const list = (opts.models ? opts.models(id) : listModels(id, { cwd: root })).catch((e: unknown) => {
+      void log('models', { agent: id, message: (e as Error).message.slice(0, 200) });
+      modelCache.delete(id);
+      return { models: [], defaultEfforts: [] } as ModelList;
+    });
+    modelCache.set(id, { at: Date.now(), list });
+    return list;
+  };
+  /** The tutor's pick for an agent, in the agent's own words: its model id and its name for the thinking level. */
+  async function choiceFor(agent: AgentId): Promise<{ model?: string; effort?: string }> {
+    const c = (await readHome()).choices?.[agent] ?? {};
+    if (!c.effort) return { model: c.model };
+    const list = await modelsOf(agent);
+    const levels = c.model ? (list.models.find((m) => m.id === c.model)?.efforts ?? []) : list.defaultEfforts;
+    return { model: c.model, effort: nativeEffort(c.effort, levels) };
+  }
+  const broadcast = (event: string, data: unknown) => {
+    for (const c of clients) c.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
   const threads = new Threads(root, {
     mcp: mcpCommand(root),
     agent: currentAgent,
-    emit: (key, ev) => {
-      for (const c of clients) c.write(`event: thread\ndata: ${JSON.stringify({ key, ev })}\n\n`);
-    },
+    emit: (key, ev, seq) => broadcast('thread', { key, ev, seq }),
+    activity: () => broadcast('activity', {}),
+    choice: choiceFor,
     today: now,
     ...opts.threads,
   });
@@ -323,6 +369,8 @@ export function createDesk(root: string, opts: { lang?: Lang; now?: () => Date; 
   /** A sentence for the agent: sent to the student's conversation at once, or (fill) put in the box for the tutor to finish. */
   const hand = (t: Text, say: string, student: string, o: { fill?: boolean; small?: boolean } = {}) =>
     `<button class="btn${o.small === false ? '' : ' small'}" data-${o.fill ? 'fill' : 'say'}="${esc(say)}" data-key="${esc(student)}">${esc(o.fill ? t.tell : t.hand)}</button>`;
+  /** A quiet word beside a student: the agent is working on them, or has replied since the tutor looked. */
+  const mark = (t: Text, a: 'working' | 'unread') => `<span class="act ${a}">${esc(t.act[a])}</span>`;
   const fixes = (s: Student, t: Text, only?: string) => {
     const ps = only ? s.problems.filter((p) => p.file.includes(only)) : s.problems;
     return ps.length ? `<div class="warn"><b>${esc(t.problems)}</b><ul class="rows">${ps.map((p) => `<li><code>${esc(p.file)}</code> <span>${esc(p.message)}</span></li>`).join('')}</ul></div>` : '';
@@ -333,7 +381,23 @@ export function createDesk(root: string, opts: { lang?: Lang; now?: () => Date; 
     const kept = (f: string) => (insideRoot(root, f) ? path.relative(root, f) : f);
     const broken = brokenFiles().map((b) => `<p class="warn">${esc(t.broken(kept(b.kept)))}</p>`).join('');
     // Settings for the page script: a data block, not a script, so the page needs no inline code.
-    const settings = JSON.stringify({ token, working: t.chat.working, noAgent: t.chat.noAgent, signIn: t.chat.signIn, missing: t.chat.missing, tools: t.chat.tools, older: t.chat.older, stalled: t.chat.stalled }).replace(/</g, '\\u003c');
+    const c = t.chat;
+    const settings = JSON.stringify({
+      token,
+      working: c.working,
+      noAgent: c.noAgent,
+      signIn: c.signIn,
+      missing: c.missing,
+      older: c.older,
+      stalled: c.stalled,
+      doing: c.doing,
+      queued: c.queued,
+      waiting: c.waiting,
+      unqueue: c.unqueue,
+      menu: c.menu,
+      attach: { ...c.attach, types: Object.keys(INBOX_TYPES), max: INBOX_MAX_BYTES, count: INBOX_MAX_FILES },
+      allSent: t.allSent,
+    }).replace(/</g, '\\u003c');
     return `<!doctype html><html lang="${lang === 'zh' ? 'zh-CN' : 'en'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${CSS}${CHAT_CSS}</style></head><body><div class="app"><main id="view" data-thread="${esc(thread)}" data-title="${esc(title)}">
 <header class="top"><a class="brand" href="/">TutorDesk</a><nav><a href="/"${here === 'week' ? ' aria-current="page"' : ''}>${esc(t.thisWeek)}</a><a href="/#students"${here === 'students' ? ' aria-current="page"' : ''}>${esc(t.students)}</a></nav><span class="date mono">${iso(d).replace(/-/g, '.')} ${esc(t.weekdays[(d.getDay() + 6) % 7]!)}</span></header>
 ${broken}${body}<footer class="foot"><a href="/problem">${esc(t.problem.link)}</a></footer></main>${chatShell(t.chat)}</div><script type="application/json" id="td">${settings}</script><script src="/assets/chat.js"></script></body></html>`;
@@ -368,15 +432,20 @@ ${broken}${body}<footer class="foot"><a href="/problem">${esc(t.problem.link)}</
     const sunday = addDays(monday, 6);
 
     const todo = tasks(students, today, t);
+    const act = threads.activity();
+    // Work the agent can do on its own; the tutor's own words (a lesson record) and approvals are not.
+    const forAgent = todo.filter((k) => k.say && k.kind !== 'record' && act[k.student.id] !== 'working');
     const taskList = todo.length
       ? `<ol class="tasks">${todo
           .map((k) => {
             const who = esc(k.student.profile?.name ?? k.student.id);
-            const action = k.kind === 'approve' ? `<a class="btn small" href="${k.href}">${esc(t.approve)}</a>` : k.say ? hand(t, k.say, k.student.id, { fill: k.kind === 'record' }) : '';
+            const busy = act[k.student.id] === 'working' && k.say && k.kind !== 'record';
+            const action = k.kind === 'approve' ? `<a class="btn small" href="${k.href}">${esc(t.approve)}</a>` : busy ? mark(t, 'working') : k.say ? hand(t, k.say, k.student.id, { fill: k.kind === 'record' }) : '';
             return `<li><span class="kind ${k.kind}">${esc(t.task[k.kind])}</span><span class="mono mute">${k.date ? md(k.date) : ''}</span><span><a href="${k.href ?? `/s/${k.student.id}`}">${who}</a> <span class="mute">${esc(k.what)}</span></span>${action}</li>`;
           })
           .join('')}</ol>`
       : `<p class="empty-note">${esc(t.nothing)}</p>`;
+    const handAll = forAgent.length >= 2 ? `<div class="actions"><button class="btn" data-all>${esc(t.handAll)} <span class="mono">${forAgent.length}</span></button></div>` : '';
 
     const todayIso = iso(today);
     const days = weekSlots(students, monday)
@@ -401,7 +470,7 @@ ${broken}${body}<footer class="foot"><a href="/problem">${esc(t.problem.link)}</
             const r = s.roadmap;
             const left = p?.exam_date ? daysBetween(todayIso, p.exam_date) : null;
             const progress = r && r.total ? `<span class="mono">${r.done}/${r.total} <span class="bar" style="width:100px;margin-left:8px"><i style="width:${Math.round((100 * r.done) / r.total)}%"></i></span></span>` : '<span></span>';
-            return `<li><a href="/s/${s.id}"><b>${esc(p?.name ?? s.id)}</b></a><span class="mute">${esc(p ? EXAM[p.exam] ?? p.exam : '')}</span><span class="mono">${p ? `${p.current ?? '–'} → ${p.target}` : ''}</span><span class="mono mute num">${left !== null && left >= 0 ? `${left} ${esc(t.days)}` : ''}</span>${progress}</li>`;
+            return `<li><a href="/s/${s.id}"><b>${esc(p?.name ?? s.id)}</b>${act[s.id] ? mark(t, act[s.id]!) : ''}</a><span class="mute">${esc(p ? EXAM[p.exam] ?? p.exam : '')}</span><span class="mono">${p ? `${p.current ?? '–'} → ${p.target}` : ''}</span><span class="mono mute num">${left !== null && left >= 0 ? `${left} ${esc(t.days)}` : ''}</span>${progress}</li>`;
           })
           .join('')}</ul>`
       : `<p class="empty-note">${esc(t.noStudents)}</p>`;
@@ -411,7 +480,7 @@ ${broken}${body}<footer class="foot"><a href="/problem">${esc(t.problem.link)}</
       t,
       'TutorDesk',
       'week',
-      `<div class="hero"><h1>${esc(t.todo)}</h1><span class="mono mute" style="font-size:20px">${todo.length}</span></div>
+      `<div class="hero"><h1>${esc(t.todo)}</h1><span class="mono mute" style="font-size:20px">${todo.length}</span>${handAll}</div>
 ${taskList}
 <section><div class="label"><b>${esc(offset === 0 ? t.thisWeek : t.week)}</b><span class="mono">${md(iso(monday))} – ${md(iso(sunday))}</span><span style="margin-left:auto;display:flex;gap:16px"><a href="/?w=${offset - 1}">${esc(t.prev)}</a>${offset ? `<a href="/">${esc(t.thisWeek)}</a>` : ''}<a href="/?w=${offset + 1}">${esc(t.next)}</a></span></div>
 <div class="week">${days}</div></section>
@@ -439,15 +508,15 @@ ${taskList}
       `<div class="hero"><h1>${esc(name)}</h1><div class="actions">${shared ? `<a href="/files/students/${id}/share/index.html" target="_blank">${esc(t.shareOpen)}</a><a href="/files/students/${id}/share/lessons.ics">${esc(t.calendar)}</a>` : ''}${post(`/s/${id}/share`, t.share, false, true)}</div></div>
 ${facts}${fixes(s, t)}
 <section class="cols3">
-<div><div class="label"><b>${esc(t.lessons)}</b><span class="mono">${lessons.length}</span></div>${lessons.length ? `<ul class="rows">${lessons.map((l) => `<li><span class="mono mute">${esc(l.plan ? md(l.plan.date) : '')}</span><a class="grow" href="/s/${id}/l/${l.id}">${esc(l.plan?.topic ?? l.id)}</a>${pipe(l.plan?.status)}</li>`).join('')}</ul>` : `<p class="empty-note">${esc(t.noLessons)}</p>`}</div>
-<div><div class="label"><b>${esc(t.roadmap)}</b>${s.roadmap?.total ? `<span class="mono">${s.roadmap.done}/${s.roadmap.total}</span>` : ''}</div>${s.roadmap ? `<div class="prose">${markdown(s.roadmap.body)}</div>` : `<p class="empty-note">${esc(t.noRoadmap)}</p>${hand(t, t.say.roadmap(name), id)}`}</div>
-<div><div class="label"><b>${esc(t.profile)}</b></div><div class="prose">${markdown(s.profileBody) || '<p class="empty-note">–</p>'}</div></div>
+<div id="lessons"><div class="label"><b>${esc(t.lessons)}</b><span class="mono">${lessons.length}</span></div>${lessons.length ? `<ul class="rows">${lessons.map((l) => `<li><span class="mono mute">${esc(l.plan ? md(l.plan.date) : '')}</span><a class="grow" href="/s/${id}/l/${l.id}">${esc(l.plan?.topic ?? l.id)}</a>${pipe(l.plan?.status)}</li>`).join('')}</ul>` : `<p class="empty-note">${esc(t.noLessons)}</p>`}</div>
+<div id="roadmap"><div class="label"><b>${esc(t.roadmap)}</b>${s.roadmap?.total ? `<span class="mono">${s.roadmap.done}/${s.roadmap.total}</span>` : ''}</div>${s.roadmap ? `<div class="prose">${markdown(s.roadmap.body)}</div>` : `<p class="empty-note">${esc(t.noRoadmap)}</p>${hand(t, t.say.roadmap(name), id)}`}</div>
+<div id="profile"><div class="label"><b>${esc(t.profile)}</b></div><div class="prose">${markdown(s.profileBody) || '<p class="empty-note">–</p>'}</div></div>
 </section>`,
       id,
     );
   }
 
-  async function lesson(id: string, lessonId: string, lang: Lang, t: Text): Promise<string> {
+  async function lesson(id: string, lessonId: string, lang: Lang, t: Text, pick?: string | null): Promise<string> {
     if (!(await exists(path.join(studentsDir(root), id, 'lessons', lessonId)))) throw new NotFound();
     const s = await readStudent(root, id);
     const x = s.lessons.find((y) => y.id === lessonId);
@@ -469,8 +538,10 @@ ${facts}${fixes(s, t)}
       .sort((a, c) => Number(a.endsWith('-teacher.pdf')) - Number(c.endsWith('-teacher.pdf')) || a.localeCompare(c))
       .map((f) => {
         const kind = f.replace(/(-teacher)?\.pdf$/, '');
-        return { url: `/files/students/${id}/lessons/${lessonId}/out/${f}`, label: `${t.kinds[kind] ?? kind} · ${f.endsWith('-teacher.pdf') ? t.teacherEd : t.studentEd}` };
+        return { file: f, url: `/files/students/${id}/lessons/${lessonId}/out/${f}`, label: `${t.kinds[kind] ?? kind} · ${f.endsWith('-teacher.pdf') ? t.teacherEd : t.studentEd}` };
       });
+    // A link from the conversation opens the PDF it names.
+    const shown = Math.max(0, pdfs.findIndex((f) => f.file === pick));
     const record = await readFile(path.join(studentsDir(root), id, 'lessons', lessonId, 'record.md'), 'utf8').catch(() => null);
     const stages = `<div class="stages${status === 'draft' ? ' draft' : ''}">${t.stages.map((label, i) => `<span${status && LESSON_STATUS.indexOf(status) >= i ? ' class="on"' : ''}>${esc(label)}</span>`).join('')}</div>`;
     return page(
@@ -482,18 +553,39 @@ ${facts}${fixes(s, t)}
 <p class="mono mute">${esc([p?.date.replace(/-/g, '.'), p?.time, p?.minutes ? `${p.minutes} min` : ''].filter(Boolean).join('  ·  '))}</p>
 ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
 <section class="cols">
-<div><div class="label"><b>${esc(t.plan)}</b></div><div class="prose">${markdown(x.planBody) || '<p class="empty-note">–</p>'}</div>${record ? `<div class="label" style="margin-top:28px"><b>${esc(t.record)}</b></div><div class="prose">${markdown(record.replace(/^﻿?---[\s\S]*?---\r?\n?/, ''))}</div>` : ''}</div>
-<div><div class="label"><b>${esc(t.materials)}</b><span class="mono">${pdfs.length}</span></div>${pdfs.length ? `<nav class="tabs">${pdfs.map((f, i) => `<a href="${f.url}" target="pdf" data-tab${i === 0 ? ' class="on"' : ''}>${esc(f.label)}</a>`).join('')}</nav><iframe name="pdf" title="${esc(t.materials)}" src="${pdfs[0]!.url}"></iframe>` : `<p class="empty-note">${esc(t.noMaterials)}</p>`}</div>
+<div><div id="plan"><div class="label"><b>${esc(t.plan)}</b></div><div class="prose">${markdown(x.planBody) || '<p class="empty-note">–</p>'}</div></div>${record ? `<div id="record"><div class="label" style="margin-top:28px"><b>${esc(t.record)}</b></div><div class="prose">${markdown(record.replace(/^﻿?---[\s\S]*?---\r?\n?/, ''))}</div></div>` : ''}</div>
+<div id="materials"><div class="label"><b>${esc(t.materials)}</b><span class="mono">${pdfs.length}</span></div>${pdfs.length ? `<nav class="tabs">${pdfs.map((f, i) => `<a href="${f.url}" target="pdf" data-tab${i === shown ? ' class="on"' : ''}>${esc(f.label)}</a>`).join('')}</nav><iframe name="pdf" title="${esc(t.materials)}" src="${pdfs[shown]!.url}"></iframe>` : `<p class="empty-note">${esc(t.noMaterials)}</p>`}</div>
 </section>`,
       id,
     );
   }
 
-  /** Only lesson PDFs, the generated parent page and the desk's fonts leave the workspace this way. */
+  /** Only lesson PDFs, the generated parent page, the tutor's attachments and the desk's fonts leave the workspace this way. */
   async function file(rel: string, res: ServerResponse): Promise<void> {
     const parts = rel.split('/');
     const okPdf = parts.length === 6 && parts[0] === 'students' && ID.test(parts[1]!) && parts[2] === 'lessons' && ID.test(parts[3]!) && parts[4] === 'out' && /^[a-z0-9-]+\.pdf$/.test(parts[5]!);
     const okShare = parts.length === 4 && parts[0] === 'students' && ID.test(parts[1]!) && parts[2] === 'share' && /^(index\.html|lessons\.ics|[a-z0-9-]+\.pdf)$/.test(parts[3]!);
+    const upload = parts.at(-1)!;
+    const okInbox = ((parts.length === 4 && parts[0] === 'students' && ID.test(parts[1]!) && parts[2] === 'inbox') || (parts.length === 2 && parts[0] === 'inbox')) && upload === cleanName(upload) && refuse(upload, 1) === null;
+    if (okInbox) {
+      const full = path.join(root, ...parts);
+      if (!insideRoot(root, full)) throw new NotFound();
+      const data = await readFile(full).catch(() => {
+        throw new NotFound();
+      });
+      const type = typeOf(upload)!;
+      // An upload is someone else's file: shown as itself, never run. Word files download.
+      const inline = type.startsWith('image/') || type === 'application/pdf' || type.startsWith('text/plain');
+      res.writeHead(200, {
+        'content-type': type,
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+        'content-disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(upload)}`,
+        ...(type === 'application/pdf' ? {} : { 'content-security-policy': "sandbox; default-src 'none'; img-src 'self'; style-src 'unsafe-inline'" }),
+      });
+      res.end(data);
+      return;
+    }
     if (!okPdf && !okShare) throw new NotFound();
     // The same check the agents get: a linked folder cannot serve files from elsewhere.
     const full = path.join(root, ...parts);
@@ -506,6 +598,19 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
     const extra = type.startsWith('text/html') ? { 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'", 'referrer-policy': 'no-referrer' } : {};
     res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra });
     res.end(data);
+  }
+
+  /** A request body up to `max` bytes; null when it is larger (the rest is not read). */
+  async function body(req: IncomingMessage, max: number): Promise<Buffer | null> {
+    if (Number(req.headers['content-length'] ?? 0) > max) return null;
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const c of req as AsyncIterable<Buffer>) {
+      size += c.length;
+      // Past the limit the rest is read and dropped, so the answer still reaches the page.
+      if (size <= max) chunks.push(c);
+    }
+    return size > max ? null : Buffer.concat(chunks);
   }
 
   async function raw(req: IncomingMessage): Promise<string> {
@@ -558,8 +663,20 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
         res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
         res.end(JSON.stringify(o));
       };
+      // An attachment: the file itself is the body, so the token comes as a header.
+      if (req.method === 'POST' && url.pathname === '/api/upload') {
+        if (req.headers['x-td-token'] !== token) return json({ error: 'Reload the page and try again.' }, 403);
+        const key = url.searchParams.get('key') ?? '';
+        const name = url.searchParams.get('name') ?? '';
+        if (key !== '' && !ID.test(key)) return json({ error: 'Not a student' }, 400);
+        if (refuse(name, 1) === 'type') return json({ error: t.chat.attach.type.replace('{x}', name) }, 415);
+        const data = await body(req, INBOX_MAX_BYTES);
+        if (!data) return json({ error: t.chat.attach.size.replace('{x}', name) }, 413);
+        if (!data.length) return json({ error: 'Empty file' }, 400);
+        return json({ file: await saveUpload(root, key, name, data, now()) });
+      }
       if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
-        let a: { token?: string; key?: string; text?: string; agent?: string };
+        let a: { token?: string; key?: string; text?: string; agent?: string; files?: unknown; id?: string; model?: string; effort?: string };
         try {
           a = JSON.parse(await raw(req)) as typeof a;
         } catch {
@@ -569,15 +686,32 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
         const key = a.key ?? '';
         if (key !== '' && !ID.test(key)) return json({ error: 'Not a student' }, 400);
         try {
-          if (url.pathname === '/api/send') await threads.send(key, String(a.text ?? '').slice(0, 20_000));
-          else if (url.pathname === '/api/stop') await threads.stop(key);
-          else if (url.pathname === '/api/agent' && AGENTS.some((x) => x.id === a.agent)) await rememberAgent(a.agent!);
-          else throw new NotFound();
+          if (url.pathname === '/api/send') return json(await threads.send(key, String(a.text ?? '').slice(0, 20_000), await checkAttachments(root, key, a.files)));
+          if (url.pathname === '/api/stop') await threads.stop(key);
+          else if (url.pathname === '/api/unqueue') await threads.unqueue(key, String(a.id ?? ''));
+          else if (url.pathname === '/api/choice' && AGENTS.some((x) => x.id === a.agent)) {
+            const model = typeof a.model === 'string' && /^[\w.:/@[\]-]{1,120}$/.test(a.model) ? a.model : undefined;
+            await rememberChoice(a.agent!, { model, effort: a.effort === 'fast' || a.effort === 'deep' ? a.effort : undefined });
+          } else if (url.pathname === '/api/all') {
+            // Every task the agent can do alone goes to its student's conversation; the queue takes it from there.
+            let sent = 0;
+            for (const k of tasks(await listStudents(root), now(), t)) {
+              if (!k.say || k.kind === 'record') continue;
+              if (!(await threads.send(k.student.id, k.say, [], { unique: true })).skipped) sent++;
+            }
+            return json({ sent });
+          } else throw new NotFound();
         } catch (e) {
           if (e instanceof NotFound) throw e;
           return json({ error: (e as Error).message }, 409);
         }
         return json({ ok: true });
+      }
+      if (url.pathname === '/api/models') {
+        const id = AGENTS.find((x) => x.id === url.searchParams.get('agent'))?.id;
+        const status = (await agents()).find((x) => x.id === id);
+        if (!id || !status || !ready(status)) return json({ models: [], defaultEfforts: [] });
+        return json(await modelsOf(id));
       }
       if (url.pathname === '/api/thread') {
         const key = url.searchParams.get('key') ?? '';
@@ -587,7 +721,21 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
         const v = await threads.view(key);
         const who = key ? ((await readStudent(root, key).catch(() => null))?.profile?.name ?? key) : t.chat.general;
         const list = await agents();
-        return json({ who, html: renderEntries(v.entries, t.chat, key), running: v.running, stalled: v.stalled, older: v.older, partial: v.partial, steps: v.steps.filter((s) => s.status === 'running').map((s) => ({ name: t.chat.tools[s.name] ?? s.name, target: s.target })), agent: await currentAgent(), agents: list.map((x) => ({ id: x.id, label: x.label, ready: ready(x), installed: x.installed, hint: x.hint ?? '' })) });
+        const choices = (await readHome()).choices ?? {};
+        return json({
+          who,
+          html: renderEntries(v.entries, t.chat, key),
+          seq: v.seq,
+          running: v.running,
+          stalled: v.stalled,
+          older: v.older,
+          partial: v.partial,
+          steps: v.steps,
+          plan: v.plan,
+          queue: v.queue,
+          agent: await currentAgent(),
+          agents: list.map((x) => ({ id: x.id, label: x.label, ready: ready(x), installed: x.installed, hint: x.hint ?? '', choice: choices[x.id] ?? {} })),
+        });
       }
       if (req.method === 'POST') {
         const form = new URLSearchParams(await raw(req));
@@ -603,7 +751,7 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
           // Approving is the go-ahead: the agent starts on the materials without being asked again.
           const lessonPlan = (await readStudent(root, sid)).lessons.find((x) => x.id === lid)?.plan;
           const name = (await readStudent(root, sid)).profile?.name ?? sid;
-          if (lessonPlan && !threads.isRunning(sid) && (await currentAgent())) await threads.send(sid, t.say.write(name, md(lessonPlan.date))).catch(() => {});
+          if (lessonPlan && (await currentAgent())) await threads.send(sid, t.say.write(name, md(lessonPlan.date)), [], { unique: true }).catch(() => {});
           res.writeHead(303, { location: `/s/${sid}/l/${lid}` }).end();
         } else if (share && ID.test(share[1]!)) {
           await buildShare(root, share[1]!, { lang, now: now() });
@@ -626,7 +774,7 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
       const st = /^\/s\/([a-z0-9-]+)$/.exec(url.pathname);
       if (st && ID.test(st[1]!)) return html(await student(st[1]!, lang, t));
       const ls = /^\/s\/([a-z0-9-]+)\/l\/([a-z0-9-]+)$/.exec(url.pathname);
-      if (ls && ID.test(ls[1]!) && ID.test(ls[2]!)) return html(await lesson(ls[1]!, ls[2]!, lang, t));
+      if (ls && ID.test(ls[1]!) && ID.test(ls[2]!)) return html(await lesson(ls[1]!, ls[2]!, lang, t, url.searchParams.get('pdf')));
       if (url.pathname.startsWith('/files/')) return await file(decodeURIComponent(url.pathname.slice(7)), res);
       throw new NotFound();
     } catch (e) {
