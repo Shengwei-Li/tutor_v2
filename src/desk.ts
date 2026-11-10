@@ -5,12 +5,20 @@ import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { parse } from 'yaml';
+import { AGENTS, agentStatus, type AgentId, type AgentStatus } from './agents/index.ts';
+import { approval, approve } from './approvals.ts';
+import { CHAT_CSS, CHAT_SCRIPT, chatShell, renderEntries } from './chat.ts';
+import { brokenFiles, insideRoot } from './files.ts';
+import { readHome, rememberAgent } from './home.ts';
+import { log, logError, tail } from './log.ts';
+import { mcpCommand, setupWorkspace } from './init.ts';
 import { esc, markdown } from './md.ts';
+import { Threads, type ThreadDeps } from './threads.ts';
 import { exists } from './proc.ts';
 import { buildShare } from './share.ts';
-import { selfCommand } from './paths.ts';
+import { VERSION, selfCommand } from './paths.ts';
 import { TEMPLATES } from './tex.ts';
-import { ID, LESSON_STATUS, listStudents, readStudent, setLessonStatus, studentsDir, type Lesson, type LessonStatus, type Student } from './workspace.ts';
+import { ID, LESSON_STATUS, listStudents, readStudent, studentsDir, type Lesson, type LessonStatus, type Student } from './workspace.ts';
 
 /**
  * The desk: a local web page over the workspace. It says what needs the tutor (plans to approve,
@@ -26,13 +34,36 @@ const cjk = (name: string) => (/[A-Za-z]/.test(name) ? ` ${name} ` : name);
 
 const T = {
   en: {
-    todo: 'Needs you', nothing: 'Nothing waiting. The week is in order.', week: 'Week', students: 'Students', noStudents: 'No students yet. Open your agent in this folder and describe your first student.',
+    todo: 'Needs you', nothing: 'Nothing waiting. The week is in order.', week: 'Week', students: 'Students', noStudents: 'No students yet. Describe your first student to the agent, in the conversation on the right.',
     stages: ['Plan', 'Approved', 'Materials', 'Taught'], notPrepared: 'Not prepared', status: { draft: 'Plan to approve', approved: 'Approved, materials next', ready: 'Materials ready', taught: 'Taught' },
-    approve: 'Approve plan', copy: 'Copy for your agent', copied: 'Copied', prev: '← Earlier', next: 'Later →', thisWeek: 'This week', today: 'Today',
+    approve: 'Approve plan', approveAgain: 'Approve again', changed: 'Changed since you approved it', hand: 'Hand to agent', tell: 'Tell the agent', prev: '← Earlier', next: 'Later →', thisWeek: 'This week', today: 'Today',
     exam: 'Exam', target: 'Target', now: 'Now', days: 'days', past: 'past', roadmap: 'Course plan', noRoadmap: 'No course plan yet.', lessons: 'Lessons', noLessons: 'No lessons yet.', profile: 'Profile',
     materials: 'Materials', noMaterials: 'No PDFs yet.', record: 'After the lesson', plan: 'Plan', all: 'All students', share: 'Make parent page', shareOpen: 'Parent page', calendar: 'Calendar file',
     problems: 'Files to fix', studentEd: 'student', teacherEd: 'teacher', kinds: { handout: 'Handout', worksheet: 'Worksheet', script: 'Script', deck: 'Slides' } as Record<string, string>,
     weekdays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+    chat: {
+      general: 'General', signIn: 'not signed in', missing: 'not installed', placeholder: 'Tell the agent what to do…', send: 'Send', stop: 'Stop', working: 'Working…',
+      noAgent: 'No agent is ready. Install Codex, Claude Code or OpenCode, sign in once, then reload this page.',
+      steps: (n: number) => `${n} step${n === 1 ? '' : 's'} (reading, writing)`,
+      tools: { check_workspace: 'Checked the files', export_pdf: 'Exported PDF', share_with_parents: 'Made the parent page', setup_workspace: 'Set up the workspace' } as Record<string, string>,
+      retry: 'Try again', older: 'Earlier conversation', stalled: 'No word from the agent for 20 minutes. It may be stuck.',
+      notes: {
+        stopped: 'Stopped.',
+        failed: (a: string) => `${a} stopped with an error.`,
+        interrupted: (a: string) => `${a} was cut off before it finished.`,
+        missing: (a: string) => `${a} is not installed. Install it, then try again.`,
+        notSignedIn: (a: string) => `${a} is not signed in. Sign in once, then try again.`,
+        noStart: (a: string) => `${a} did not start.`,
+        restarted: (a: string) => `Could not continue the earlier ${a} conversation, so a new one began.`,
+        restored: 'The agent changed its own instructions. They were put back:',
+      },
+    },
+    problem: {
+      link: 'Something wrong?', intro: 'Copy this and send it to whoever helps you with TutorDesk. It holds no conversations and no student names.',
+      version: 'Version', workspace: 'Workspace', agents: 'Agents', log: 'Recent log', copy: 'Copy', copied: 'Copied', empty: 'Nothing logged yet.',
+      ready: 'ready', signIn: 'not signed in', missing: 'not installed',
+    },
+    broken: (kept: string) => `A file could not be read and was put aside as ${kept}. The desk carries on without it.`,
     task: { approve: 'Approve', roadmap: 'Plan course', prepare: 'Prepare', write: 'Materials', record: 'Record', fix: 'Fix' }, countdown: 'Until exam',
     say: {
       prepare: (n: string, d: string) => `Prepare ${n}'s lesson on ${d}.`,
@@ -43,13 +74,36 @@ const T = {
     },
   },
   zh: {
-    todo: '待你处理', nothing: '没有待办，这周都安排好了。', week: '周', students: '学生', noStudents: '还没有学生。在这个文件夹里打开你的 agent，描述第一个学生。',
+    todo: '待你处理', nothing: '没有待办，这周都安排好了。', week: '周', students: '学生', noStudents: '还没有学生。在右边的对话里，向 agent 描述你的第一个学生。',
     stages: ['计划', '确认', '材料', '上课'], notPrepared: '未备课', status: { draft: '计划待确认', approved: '已确认，待写材料', ready: '材料已出', taught: '已上课' },
-    approve: '确认计划', copy: '复制给 agent', copied: '已复制', prev: '← 上一周', next: '下一周 →', thisWeek: '本周', today: '今天',
+    approve: '确认计划', approveAgain: '重新确认', changed: '计划在确认后有改动', hand: '交给 agent', tell: '告诉 agent', prev: '← 上一周', next: '下一周 →', thisWeek: '本周', today: '今天',
     exam: '考试', target: '目标', now: '现在', days: '天', past: '已过', roadmap: '课程规划', noRoadmap: '还没有课程规划。', lessons: '课次', noLessons: '还没有课次。', profile: '画像',
     materials: '材料', noMaterials: '还没有 PDF。', record: '课后记录', plan: '计划', all: '全部学生', share: '生成家长页', shareOpen: '家长页', calendar: '日历文件',
     problems: '需要修正的文件', studentEd: '学生版', teacherEd: '教师版', kinds: { handout: '讲义', worksheet: '练习卷', script: '教案', deck: '幻灯片' } as Record<string, string>,
     weekdays: ['周一', '周二', '周三', '周四', '周五', '周六', '周日'],
+    chat: {
+      general: '通用对话', signIn: '未登录', missing: '未安装', placeholder: '告诉 agent 要做什么…', send: '发送', stop: '停止', working: '正在处理…',
+      noAgent: '没有可用的 agent。请安装 Codex、Claude Code 或 OpenCode 并登录一次，然后刷新本页。',
+      steps: (n: number) => `${n} 步（读写文件）`,
+      tools: { check_workspace: '检查文件', export_pdf: '导出 PDF', share_with_parents: '生成家长页', setup_workspace: '建立工作区' } as Record<string, string>,
+      retry: '重试', older: '更早的对话', stalled: '20 分钟没有动静，可能卡住了。',
+      notes: {
+        stopped: '已停止。',
+        failed: (a: string) => `${a} 出错停下了。`,
+        interrupted: (a: string) => `${a} 没做完就中断了。`,
+        missing: (a: string) => `${a} 没有安装。装好后点重试。`,
+        notSignedIn: (a: string) => `${a} 还没登录。登录一次后点重试。`,
+        noStart: (a: string) => `${a} 没能启动。`,
+        restarted: (a: string) => `没能接上之前的 ${a} 对话，开了一个新的。`,
+        restored: 'agent 改动了自己的说明文件，已经改回：',
+      },
+    },
+    problem: {
+      link: '出了问题？', intro: '把下面的内容复制给帮你处理 TutorDesk 的人。里面没有对话内容，也没有学生姓名。',
+      version: '版本', workspace: '工作区', agents: 'Agent', log: '最近的日志', copy: '复制', copied: '已复制', empty: '还没有日志。',
+      ready: '可用', signIn: '未登录', missing: '未安装',
+    },
+    broken: (kept: string) => `有个文件读不了，已另存为 ${kept}。备课台先不用它，照常工作。`,
     task: { approve: '确认', roadmap: '规划', prepare: '备课', write: '写材料', record: '记录', fix: '修正' }, countdown: '距考试',
     say: {
       prepare: (n: string, d: string) => `帮${cjk(n)}备 ${d} 的课。`,
@@ -153,7 +207,7 @@ const CSS = `
 *{box-sizing:border-box;margin:0}
 body{background:var(--paper);color:var(--ink);font:15px/1.55 Plex,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
 a{color:inherit;text-decoration:none}a:hover{text-decoration:underline;text-underline-offset:3px}
-main{max-width:1200px;margin:0 auto;padding:28px 40px 80px}
+main{max-width:1200px;width:100%;margin:0 auto;padding:28px 40px 80px}
 .mono{font-family:PlexMono,ui-monospace,monospace;font-variant-numeric:tabular-nums}
 .mute{color:var(--mute)}
 .top{display:flex;align-items:baseline;gap:28px;padding-bottom:14px;border-bottom:2px solid var(--ink)}
@@ -199,35 +253,24 @@ code{font-family:PlexMono,ui-monospace,monospace;font-size:13px}
 iframe{display:block;width:100%;height:80vh;border:1px solid var(--ink);background:#fff}
 .warn{border-top:2px solid var(--accent);padding:10px 0;color:var(--accent)}.warn li{margin:2px 0}
 .empty-note{padding:14px 0;color:var(--mute)}
+.foot{margin-top:72px;font-size:12px;color:var(--mute)}
+.report{font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px 0;border-top:1px solid var(--rule)}
 @media (max-width:900px){main{padding:20px 16px 64px}.cols,.cols3{grid-template-columns:minmax(0,1fr);gap:28px}.week{grid-template-columns:minmax(0,1fr)}
 .day,.day+.day{min-height:0;padding:12px 0;border-left:0;border-top:1px solid var(--rule)}.day .w{display:inline;margin-left:8px}.day .n{display:inline;font-size:22px}
 .tasks li{grid-template-columns:64px minmax(0,1fr);gap:4px 12px}.roster li{display:flex;flex-wrap:wrap;gap:4px 14px}.roster li>a{flex-basis:100%}.tasks li>:nth-child(n+3){grid-column:2}.top nav{display:none}}
 `;
 
-const SCRIPT = `
-// ?static: no live reload (printing, screenshots).
-if (!new URLSearchParams(location.search).has('static')) new EventSource('/events').onmessage = () => location.reload();
-document.addEventListener('click', async (e) => {
-  const b = e.target.closest('[data-copy]');
-  if (!b) return;
-  const text = b.dataset.copy;
-  let ok = await navigator.clipboard?.writeText(text).then(() => true, () => false);
-  if (!ok) {
-    const area = Object.assign(document.createElement('textarea'), { value: text });
-    document.body.append(area);
-    area.select();
-    ok = document.execCommand('copy');
-    area.remove();
-  }
-  // Last resort: show the sentence selected, ready for Ctrl+C.
-  if (!ok) return void prompt('', text);
-  const was = b.textContent;
-  b.textContent = b.dataset.done;
-  setTimeout(() => (b.textContent = was), 1600);
-});
-`;
-
 class NotFound extends Error {}
+
+/**
+ * Every desk page: its own scripts, styles, fonts and frames only. Agent replies are escaped already;
+ * this is the second line if something slips through.
+ */
+const SECURITY = {
+  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'",
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+};
 
 export interface Desk {
   handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
@@ -235,13 +278,38 @@ export interface Desk {
   changed(): void;
   /** How long nobody has looked: 0 while a page is open. */
   idleMs(): number;
+  /** Stop the agents this desk started. */
+  close(): Promise<void>;
 }
 
-export function createDesk(root: string, opts: { lang?: Lang; now?: () => Date } = {}): Desk {
+export function createDesk(root: string, opts: { lang?: Lang; now?: () => Date; /** Tests: the agents on this computer, and scripted sessions. */ agents?: AgentStatus[]; threads?: Partial<ThreadDeps> } = {}): Desk {
   const token = randomBytes(16).toString('hex');
   const now = opts.now ?? (() => new Date());
   const clients = new Set<ServerResponse>();
   let lastSeen = Date.now();
+
+  // Which agents are installed and signed in: asked of their own programs, so remembered for a minute.
+  let status: { at: number; list: Promise<AgentStatus[]> } | undefined;
+  const agents = () => {
+    if (!status || Date.now() - status.at > 60_000) status = { at: Date.now(), list: opts.agents ? Promise.resolve(opts.agents) : agentStatus() };
+    return status.list;
+  };
+  const ready = (a: AgentStatus) => a.installed && a.signedIn !== false;
+  /** The agent the tutor chose if it is ready, else the first that is. */
+  async function currentAgent(): Promise<AgentId | null> {
+    const list = (await agents()).filter(ready);
+    const chosen = (await readHome()).agent;
+    return (list.find((a) => a.id === chosen) ?? list[0])?.id ?? null;
+  }
+  const threads = new Threads(root, {
+    mcp: mcpCommand(root),
+    agent: currentAgent,
+    emit: (key, ev) => {
+      for (const c of clients) c.write(`event: thread\ndata: ${JSON.stringify({ key, ev })}\n\n`);
+    },
+    today: now,
+    ...opts.threads,
+  });
 
   async function config(): Promise<{ lang: Lang; studio?: string }> {
     const c = ((await readFile(path.join(root, 'tutordesk.yaml'), 'utf8').then(parse, () => null)) ?? {}) as { language?: string; studio?: string };
@@ -251,19 +319,46 @@ export function createDesk(root: string, opts: { lang?: Lang; now?: () => Date }
 
   const pipe = (s?: LessonStatus) => `<span class="pipe${s === 'draft' ? ' draft' : ''}" aria-hidden="true">${LESSON_STATUS.map((x, i) => `<i${s && LESSON_STATUS.indexOf(s) >= i ? ' class="on"' : ''}></i>`).join('')}</span>`;
   const state = (t: Text, s?: LessonStatus) => `${pipe(s)}<span class="state${s === 'draft' ? ' draft' : ''}">${esc(s ? t.status[s] : t.notPrepared)}</span>`;
-  const post = (action: string, label: string, primary = false) => `<form method="post" action="${esc(action)}"><input type="hidden" name="token" value="${token}"><button class="btn${primary ? ' primary' : ''}">${esc(label)}</button></form>`;
-  const copy = (t: Text, say: string, small = true) => `<button class="btn${small ? ' small' : ''}" data-copy="${esc(say)}" data-done="${esc(t.copied)}">${esc(t.copy)}</button>`;
+  const post = (action: string, label: string, primary = false, newTab = false) => `<form method="post" action="${esc(action)}"${newTab ? ' target="_blank"' : ''}><input type="hidden" name="token" value="${token}"><button class="btn${primary ? ' primary' : ''}">${esc(label)}</button></form>`;
+  /** A sentence for the agent: sent to the student's conversation at once, or (fill) put in the box for the tutor to finish. */
+  const hand = (t: Text, say: string, student: string, o: { fill?: boolean; small?: boolean } = {}) =>
+    `<button class="btn${o.small === false ? '' : ' small'}" data-${o.fill ? 'fill' : 'say'}="${esc(say)}" data-key="${esc(student)}">${esc(o.fill ? t.tell : t.hand)}</button>`;
   const fixes = (s: Student, t: Text, only?: string) => {
     const ps = only ? s.problems.filter((p) => p.file.includes(only)) : s.problems;
     return ps.length ? `<div class="warn"><b>${esc(t.problems)}</b><ul class="rows">${ps.map((p) => `<li><code>${esc(p.file)}</code> <span>${esc(p.message)}</span></li>`).join('')}</ul></div>` : '';
   };
 
-  const page = (lang: Lang, t: Text, title: string, here: 'week' | 'students' | '', body: string) => {
+  const page = (lang: Lang, t: Text, title: string, here: 'week' | 'students' | '', body: string, thread = '') => {
     const d = now();
-    return `<!doctype html><html lang="${lang === 'zh' ? 'zh-CN' : 'en'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${CSS}</style></head><body><main>
+    const kept = (f: string) => (insideRoot(root, f) ? path.relative(root, f) : f);
+    const broken = brokenFiles().map((b) => `<p class="warn">${esc(t.broken(kept(b.kept)))}</p>`).join('');
+    // Settings for the page script: a data block, not a script, so the page needs no inline code.
+    const settings = JSON.stringify({ token, working: t.chat.working, noAgent: t.chat.noAgent, signIn: t.chat.signIn, missing: t.chat.missing, tools: t.chat.tools, older: t.chat.older, stalled: t.chat.stalled }).replace(/</g, '\\u003c');
+    return `<!doctype html><html lang="${lang === 'zh' ? 'zh-CN' : 'en'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${CSS}${CHAT_CSS}</style></head><body><div class="app"><main id="view" data-thread="${esc(thread)}" data-title="${esc(title)}">
 <header class="top"><a class="brand" href="/">TutorDesk</a><nav><a href="/"${here === 'week' ? ' aria-current="page"' : ''}>${esc(t.thisWeek)}</a><a href="/#students"${here === 'students' ? ' aria-current="page"' : ''}>${esc(t.students)}</a></nav><span class="date mono">${iso(d).replace(/-/g, '.')} ${esc(t.weekdays[(d.getDay() + 6) % 7]!)}</span></header>
-${body}</main><script>${SCRIPT}</script></body></html>`;
+${broken}${body}<footer class="foot"><a href="/problem">${esc(t.problem.link)}</a></footer></main>${chatShell(t.chat)}</div><script type="application/json" id="td">${settings}</script><script src="/assets/chat.js"></script></body></html>`;
   };
+
+  async function problem(lang: Lang, t: Text): Promise<string> {
+    const p = t.problem;
+    const list = await agents();
+    const lines = [
+      `TutorDesk ${VERSION} · ${process.platform} ${process.arch} · Node ${process.versions.node}`,
+      `${p.workspace}: ${path.resolve(root)}`,
+      `${p.agents}: ${list.map((a) => `${a.label} ${ready(a) ? p.ready : a.installed ? p.signIn : p.missing}${a.version ? ` (${a.version})` : ''}`).join(', ') || '–'}`,
+      '',
+      (await tail(50)) || p.empty,
+    ];
+    return page(
+      lang,
+      t,
+      p.link,
+      '',
+      `<div class="hero"><h1>${esc(p.link)}</h1><div class="actions"><button class="btn primary" data-copy="report" data-done="${esc(p.copied)}">${esc(p.copy)}</button></div></div>
+<p class="mute" style="max-width:60ch">${esc(p.intro)}</p>
+<section><div class="label"><b>${esc(p.log)}</b></div><pre id="report" class="report mono">${esc(lines.join('\n'))}</pre></section>`,
+    );
+  }
 
   async function home(url: URL, lang: Lang, t: Text): Promise<string> {
     const students = await listStudents(root);
@@ -277,7 +372,7 @@ ${body}</main><script>${SCRIPT}</script></body></html>`;
       ? `<ol class="tasks">${todo
           .map((k) => {
             const who = esc(k.student.profile?.name ?? k.student.id);
-            const action = k.kind === 'approve' ? `<a class="btn small" href="${k.href}">${esc(t.approve)}</a>` : k.say ? copy(t, k.say) : '';
+            const action = k.kind === 'approve' ? `<a class="btn small" href="${k.href}">${esc(t.approve)}</a>` : k.say ? hand(t, k.say, k.student.id, { fill: k.kind === 'record' }) : '';
             return `<li><span class="kind ${k.kind}">${esc(t.task[k.kind])}</span><span class="mono mute">${k.date ? md(k.date) : ''}</span><span><a href="${k.href ?? `/s/${k.student.id}`}">${who}</a> <span class="mute">${esc(k.what)}</span></span>${action}</li>`;
           })
           .join('')}</ol>`
@@ -341,13 +436,14 @@ ${taskList}
       t,
       name,
       'students',
-      `<div class="hero"><h1>${esc(name)}</h1><div class="actions">${shared ? `<a href="/files/students/${id}/share/index.html" target="_blank">${esc(t.shareOpen)}</a><a href="/files/students/${id}/share/lessons.ics">${esc(t.calendar)}</a>` : ''}${post(`/s/${id}/share`, t.share)}</div></div>
+      `<div class="hero"><h1>${esc(name)}</h1><div class="actions">${shared ? `<a href="/files/students/${id}/share/index.html" target="_blank">${esc(t.shareOpen)}</a><a href="/files/students/${id}/share/lessons.ics">${esc(t.calendar)}</a>` : ''}${post(`/s/${id}/share`, t.share, false, true)}</div></div>
 ${facts}${fixes(s, t)}
 <section class="cols3">
 <div><div class="label"><b>${esc(t.lessons)}</b><span class="mono">${lessons.length}</span></div>${lessons.length ? `<ul class="rows">${lessons.map((l) => `<li><span class="mono mute">${esc(l.plan ? md(l.plan.date) : '')}</span><a class="grow" href="/s/${id}/l/${l.id}">${esc(l.plan?.topic ?? l.id)}</a>${pipe(l.plan?.status)}</li>`).join('')}</ul>` : `<p class="empty-note">${esc(t.noLessons)}</p>`}</div>
-<div><div class="label"><b>${esc(t.roadmap)}</b>${s.roadmap?.total ? `<span class="mono">${s.roadmap.done}/${s.roadmap.total}</span>` : ''}</div>${s.roadmap ? `<div class="prose">${markdown(s.roadmap.body)}</div>` : `<p class="empty-note">${esc(t.noRoadmap)}</p>${copy(t, t.say.roadmap(name))}`}</div>
+<div><div class="label"><b>${esc(t.roadmap)}</b>${s.roadmap?.total ? `<span class="mono">${s.roadmap.done}/${s.roadmap.total}</span>` : ''}</div>${s.roadmap ? `<div class="prose">${markdown(s.roadmap.body)}</div>` : `<p class="empty-note">${esc(t.noRoadmap)}</p>${hand(t, t.say.roadmap(name), id)}`}</div>
 <div><div class="label"><b>${esc(t.profile)}</b></div><div class="prose">${markdown(s.profileBody) || '<p class="empty-note">–</p>'}</div></div>
 </section>`,
+      id,
     );
   }
 
@@ -361,9 +457,12 @@ ${facts}${fixes(s, t)}
     const status = p?.status;
     const when = p ? md(p.date) : '';
     let action = '';
+    // The desk's own record decides, not the status line: a plan edited after approval asks again.
+    const recorded = await approval(root, id, lessonId);
     if (status === 'draft') action = post(`/s/${id}/l/${lessonId}/approve`, t.approve, true);
-    else if (status === 'approved') action = copy(t, t.say.write(name, when), false);
-    else if (status === 'ready' && p && p.date <= iso(now()) && !x.record) action = copy(t, t.say.record(name, when), false);
+    else if (status !== 'taught' && recorded !== 'approved') action = `<span class="state draft">${esc(t.changed)}</span>${post(`/s/${id}/l/${lessonId}/approve`, t.approveAgain, true)}`;
+    else if (status === 'approved') action = hand(t, t.say.write(name, when), id, { small: false });
+    else if (status === 'ready' && p && p.date <= iso(now()) && !x.record) action = hand(t, t.say.record(name, when), id, { fill: true, small: false });
 
     // Student editions first, each named by what it is.
     const pdfs = [...x.pdfs]
@@ -384,8 +483,9 @@ ${facts}${fixes(s, t)}
 ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
 <section class="cols">
 <div><div class="label"><b>${esc(t.plan)}</b></div><div class="prose">${markdown(x.planBody) || '<p class="empty-note">–</p>'}</div>${record ? `<div class="label" style="margin-top:28px"><b>${esc(t.record)}</b></div><div class="prose">${markdown(record.replace(/^﻿?---[\s\S]*?---\r?\n?/, ''))}</div>` : ''}</div>
-<div><div class="label"><b>${esc(t.materials)}</b><span class="mono">${pdfs.length}</span></div>${pdfs.length ? `<nav class="tabs">${pdfs.map((f, i) => `<a href="${f.url}" target="pdf"${i === 0 ? ' class="on"' : ''} onclick="document.querySelectorAll('.tabs a').forEach(a=>a.classList.toggle('on',a===this))">${esc(f.label)}</a>`).join('')}</nav><iframe name="pdf" title="${esc(t.materials)}" src="${pdfs[0]!.url}"></iframe>` : `<p class="empty-note">${esc(t.noMaterials)}</p>`}</div>
+<div><div class="label"><b>${esc(t.materials)}</b><span class="mono">${pdfs.length}</span></div>${pdfs.length ? `<nav class="tabs">${pdfs.map((f, i) => `<a href="${f.url}" target="pdf" data-tab${i === 0 ? ' class="on"' : ''}>${esc(f.label)}</a>`).join('')}</nav><iframe name="pdf" title="${esc(t.materials)}" src="${pdfs[0]!.url}"></iframe>` : `<p class="empty-note">${esc(t.noMaterials)}</p>`}</div>
 </section>`,
+      id,
     );
   }
 
@@ -395,21 +495,26 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
     const okPdf = parts.length === 6 && parts[0] === 'students' && ID.test(parts[1]!) && parts[2] === 'lessons' && ID.test(parts[3]!) && parts[4] === 'out' && /^[a-z0-9-]+\.pdf$/.test(parts[5]!);
     const okShare = parts.length === 4 && parts[0] === 'students' && ID.test(parts[1]!) && parts[2] === 'share' && /^(index\.html|lessons\.ics|[a-z0-9-]+\.pdf)$/.test(parts[3]!);
     if (!okPdf && !okShare) throw new NotFound();
-    const data = await readFile(path.join(root, ...parts)).catch(() => {
+    // The same check the agents get: a linked folder cannot serve files from elsewhere.
+    const full = path.join(root, ...parts);
+    if (!insideRoot(root, full)) throw new NotFound();
+    const data = await readFile(full).catch(() => {
       throw new NotFound();
     });
     const type = rel.endsWith('.pdf') ? 'application/pdf' : rel.endsWith('.ics') ? 'text/calendar; charset=utf-8' : 'text/html; charset=utf-8';
-    res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    // The parent page is plain HTML and styles; it runs nothing.
+    const extra = type.startsWith('text/html') ? { 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'", 'referrer-policy': 'no-referrer' } : {};
+    res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra });
     res.end(data);
   }
 
-  async function body(req: IncomingMessage): Promise<URLSearchParams> {
+  async function raw(req: IncomingMessage): Promise<string> {
     let s = '';
     for await (const c of req) {
       s += c;
-      if (s.length > 10_000) break;
+      if (s.length > 100_000) break;
     }
-    return new URLSearchParams(s);
+    return s;
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -419,14 +524,26 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
       res.writeHead(403).end();
       return;
     }
+    // Anything that changes something must come from the desk's own pages: a page elsewhere could
+    // otherwise post to it from the tutor's browser.
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.headers.origin !== `http://${req.headers.host}`) {
+      res.writeHead(403).end();
+      return;
+    }
     const url = new URL(req.url ?? '/', 'http://localhost');
     const { lang } = await config();
     const t = T[lang];
     const html = (h: string) => {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'SAMEORIGIN', 'x-content-type-options': 'nosniff' });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'SAMEORIGIN', ...SECURITY });
       res.end(h);
     };
     try {
+      if (url.pathname === '/assets/chat.js') {
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+        res.end(CHAT_SCRIPT);
+        return;
+      }
+      if (url.pathname === '/problem') return html(await problem(lang, t));
       if (url.pathname === '/events') {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
         res.write(': ok\n\n');
@@ -437,17 +554,57 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
         });
         return;
       }
+      const json = (o: unknown, code = 200) => {
+        res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(JSON.stringify(o));
+      };
+      if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
+        let a: { token?: string; key?: string; text?: string; agent?: string };
+        try {
+          a = JSON.parse(await raw(req)) as typeof a;
+        } catch {
+          return json({ error: 'Bad request' }, 400);
+        }
+        if (a.token !== token) return json({ error: 'Reload the page and try again.' }, 403);
+        const key = a.key ?? '';
+        if (key !== '' && !ID.test(key)) return json({ error: 'Not a student' }, 400);
+        try {
+          if (url.pathname === '/api/send') await threads.send(key, String(a.text ?? '').slice(0, 20_000));
+          else if (url.pathname === '/api/stop') await threads.stop(key);
+          else if (url.pathname === '/api/agent' && AGENTS.some((x) => x.id === a.agent)) await rememberAgent(a.agent!);
+          else throw new NotFound();
+        } catch (e) {
+          if (e instanceof NotFound) throw e;
+          return json({ error: (e as Error).message }, 409);
+        }
+        return json({ ok: true });
+      }
+      if (url.pathname === '/api/thread') {
+        const key = url.searchParams.get('key') ?? '';
+        if (key !== '' && !ID.test(key)) throw new NotFound();
+        const part = url.searchParams.get('part');
+        if (part) return json({ html: renderEntries(await threads.older(key, Number(part)), t.chat, key) });
+        const v = await threads.view(key);
+        const who = key ? ((await readStudent(root, key).catch(() => null))?.profile?.name ?? key) : t.chat.general;
+        const list = await agents();
+        return json({ who, html: renderEntries(v.entries, t.chat, key), running: v.running, stalled: v.stalled, older: v.older, partial: v.partial, steps: v.steps.filter((s) => s.status === 'running').map((s) => ({ name: t.chat.tools[s.name] ?? s.name, target: s.target })), agent: await currentAgent(), agents: list.map((x) => ({ id: x.id, label: x.label, ready: ready(x), installed: x.installed, hint: x.hint ?? '' })) });
+      }
       if (req.method === 'POST') {
-        const form = await body(req);
+        const form = new URLSearchParams(await raw(req));
         if (form.get('token') !== token) {
           res.writeHead(403).end();
           return;
         }
-        const approve = /^\/s\/([a-z0-9-]+)\/l\/([a-z0-9-]+)\/approve$/.exec(url.pathname);
+        const approved = /^\/s\/([a-z0-9-]+)\/l\/([a-z0-9-]+)\/approve$/.exec(url.pathname);
         const share = /^\/s\/([a-z0-9-]+)\/share$/.exec(url.pathname);
-        if (approve && ID.test(approve[1]!) && ID.test(approve[2]!)) {
-          await setLessonStatus(root, approve[1]!, approve[2]!, 'approved');
-          res.writeHead(303, { location: `/s/${approve[1]}/l/${approve[2]}` }).end();
+        if (approved && ID.test(approved[1]!) && ID.test(approved[2]!)) {
+          const [, sid, lid] = approved as unknown as [string, string, string];
+          await approve(root, sid, lid);
+          // Approving is the go-ahead: the agent starts on the materials without being asked again.
+          const lessonPlan = (await readStudent(root, sid)).lessons.find((x) => x.id === lid)?.plan;
+          const name = (await readStudent(root, sid)).profile?.name ?? sid;
+          if (lessonPlan && !threads.isRunning(sid) && (await currentAgent())) await threads.send(sid, t.say.write(name, md(lessonPlan.date))).catch(() => {});
+          res.writeHead(303, { location: `/s/${sid}/l/${lid}` }).end();
         } else if (share && ID.test(share[1]!)) {
           await buildShare(root, share[1]!, { lang, now: now() });
           res.writeHead(303, { location: `/files/students/${share[1]}/share/index.html` }).end();
@@ -456,7 +613,7 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
       }
       if (url.pathname === '/health') {
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ app: 'tutordesk', root: path.resolve(root) }));
+        res.end(JSON.stringify({ app: 'tutordesk', root: path.resolve(root), version: VERSION }));
         return;
       }
       if (url.pathname === '/') return html(await home(url, lang, t));
@@ -475,6 +632,7 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
     } catch (e) {
       if (res.headersSent) return;
       const missing = e instanceof NotFound || e instanceof URIError;
+      if (!missing) void logError(`${req.method} ${url.pathname.replace(/\/s\/[^/]+/, '/s/…')}`, e);
       res.writeHead(missing ? 404 : 500, { 'content-type': 'text/plain; charset=utf-8' });
       res.end(missing ? 'Not found' : (e as Error).message);
     }
@@ -486,6 +644,7 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
       for (const c of clients) c.write('data: changed\n\n');
     },
     idleMs: () => (clients.size ? 0 : Date.now() - lastSeen),
+    close: () => threads.closeAll(),
   };
 }
 
@@ -495,8 +654,9 @@ export const DESK_PORT = 4321;
 async function runningDesk(root: string, port: number): Promise<string | null> {
   try {
     const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(800) });
-    const h = (await r.json()) as { app?: string; root?: string };
-    return h.app === 'tutordesk' && h.root === path.resolve(root) ? `http://127.0.0.1:${port}/` : null;
+    const h = (await r.json()) as { app?: string; root?: string; version?: string };
+    // A desk left running by an older version is not reused: it would show the old pages.
+    return h.app === 'tutordesk' && h.root === path.resolve(root) && h.version === VERSION ? `http://127.0.0.1:${port}/` : null;
   } catch {
     return null;
   }
@@ -512,6 +672,8 @@ export async function startDesk(root: string, o: { port?: number; background?: b
     const existing = await runningDesk(root, p);
     if (existing) return existing;
   }
+  // The workspace carries the skills and instructions the agents read; keep them at this version.
+  await setupWorkspace(root, { remember: false });
   const desk = createDesk(root);
   const server = createServer((req, res) => void desk.handle(req, res));
   const listen = (p: number): Promise<number> =>
@@ -520,18 +682,26 @@ export async function startDesk(root: string, o: { port?: number; background?: b
       server.listen(p, '127.0.0.1', () => resolve(p));
     });
   const actual = await listen(port);
+  void log('desk', { version: VERSION, port: actual, background: o.background ?? false });
+  if (!o.background) {
+    // The desk's own process: what kills it goes in the log first.
+    process.on('uncaughtException', (e) => void logError('uncaught', e).finally(() => process.exit(1)));
+    process.on('unhandledRejection', (e) => void logError('unhandled', e));
+  }
   // Inside an agent's MCP server the desk must not keep the process alive after the agent leaves.
   if (o.background) server.unref();
   let timer: NodeJS.Timeout | undefined;
   const watcher = watch(root, { recursive: true }, (_e, f) => {
-    if (f && /^(\.git|\.agents|\.claude|node_modules)[\\/]/.test(f)) return;
+    if (f && /^(\.git|\.agents|\.claude|\.tutordesk|node_modules)[\\/]/.test(f)) return;
     clearTimeout(timer);
     timer = setTimeout(desk.changed, 300);
   });
   if (o.background) watcher.unref();
+  // Agents started from the desk must not outlive it.
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => void desk.close().finally(() => process.exit(0)));
   if (o.idleExitMs) {
     const limit = o.idleExitMs;
-    setInterval(() => desk.idleMs() > limit && process.exit(0), Math.min(60_000, limit)).unref();
+    setInterval(() => desk.idleMs() > limit && void desk.close().finally(() => process.exit(0)), Math.min(60_000, limit)).unref();
   }
   return `http://127.0.0.1:${actual}/`;
 }

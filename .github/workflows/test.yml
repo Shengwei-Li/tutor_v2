@@ -3,8 +3,10 @@ on: [push, pull_request]
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Windows only for now; add ubuntu-latest and macos-latest once those builds are tried on a real machine.
+        os: [windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -16,3 +18,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      # The program a tutor downloads: it must build here and run on its own.
+      - run: pnpm build
+      - name: Run the built program
+        shell: bash
+        env:
+          TUTORDESK_HOME: ${{ runner.temp }}/tutordesk-home
+        run: |
+          ws="$RUNNER_TEMP/workspace"
+          dist/tutordesk init "$ws"
+          dist/tutordesk check "$ws"

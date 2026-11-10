@@ -7,7 +7,7 @@ import { exists, findProgram, run } from './proc.ts';
 
 /**
  * Setting up: a workspace (a folder of student files the agents work in), and the agents themselves
- * (the TutorDesk skills and MCP server, once per computer, by `tutordesk install`).
+ * (optional: `tutordesk connect` puts the skills and MCP server into the tutor's own agents).
  */
 
 const AGENTS_MD = `# TutorDesk workspace
@@ -26,12 +26,12 @@ You work for a private English tutor preparing one-to-one IELTS and PTE lessons.
 
 ## Rules
 
-1. **The tutor decides.** A lesson plan starts as \`status: draft\`. Write materials only after the tutor approves it.
+1. **The tutor decides.** A lesson plan starts as \`status: draft\`. The tutor approves it with a button on the TutorDesk desk; you cannot approve for them, and materials come only after.
 2. **Follow the skills**: tutordesk-student-intake, tutordesk-course-roadmap, tutordesk-lesson-prep, tutordesk-lesson-materials, tutordesk-lesson-record, tutordesk-writing-review; tutordesk-teaching-standards and tutordesk-exam-ielts / tutordesk-exam-pte for every plan and material.
 3. **Check your work.** After changing student files, run the \`check_workspace\` tool and fix what it reports. PDFs come only from \`export_pdf\`.
 4. **Facts** about the exams come from the exam skills, never from memory.
 5. **Privacy.** Student data stays in this folder: no web searches or other services with student names or writing.
-6. **No terminal for the tutor.** Never ask the tutor to run a command; the desk (\`open_desk\`) is where they look and approve.
+6. **No terminal for the tutor.** Never ask the tutor to run a command; the desk is where they look and approve.
 `;
 
 const MARK = '<!-- Written by TutorDesk; it replaces this file. Delete this line to keep your own version. -->';
@@ -56,12 +56,12 @@ async function copySkills(dir: string): Promise<void> {
 export interface WorkspaceOptions {
   studio?: string;
   tutor?: string;
-  /** Also put the skills inside the workspace (development; installed agents have them user-wide). */
-  projectSkills?: boolean;
+  /** False when only refreshing a workspace that is being opened: opening is not choosing. */
+  remember?: boolean;
 }
 
 /**
- * Make a folder a workspace, or refresh one: tutordesk.yaml, students/, AGENTS.md and CLAUDE.md. Student
+ * Make a folder a workspace, or refresh one: tutordesk.yaml, students/, AGENTS.md, CLAUDE.md and the skills. Student
  * files are never touched. It becomes the workspace the desk and agents fall back to.
  */
 export async function setupWorkspace(dir: string, o: WorkspaceOptions = {}): Promise<string[]> {
@@ -78,11 +78,11 @@ export async function setupWorkspace(dir: string, o: WorkspaceOptions = {}): Pro
     done.push('tutordesk.yaml');
   }
   for (const [name, text] of [['AGENTS.md', AGENTS_MD], ['CLAUDE.md', '@AGENTS.md\n']] as const) done.push(await writeOwn(path.join(root, name), text));
-  if (o.projectSkills) {
-    for (const r of ['.agents/skills', '.claude/skills']) await copySkills(path.join(root, r));
-    done.push('skills in .agents/skills and .claude/skills');
-  }
-  await rememberWorkspace(root);
+  // The skills live in the workspace (Codex and OpenCode read .agents/skills, Claude Code .claude/skills),
+  // so nothing is installed into the agents themselves.
+  for (const r of ['.agents/skills', '.claude/skills']) await copySkills(path.join(root, r));
+  done.push('skills in .agents/skills and .claude/skills');
+  if (o.remember !== false) await rememberWorkspace(root);
   return done;
 }
 
@@ -179,24 +179,6 @@ export async function disconnectAgents(): Promise<string[]> {
       return { ...j, [key]: servers };
     });
     done.push(path.basename(file));
-  }
-  return done;
-}
-
-/**
- * Development: a workspace that carries everything itself (skills and MCP entries pointing at it), so
- * nothing user-wide changes except the Codex entry, which only exists user-wide.
- */
-export async function init(dir: string, o: WorkspaceOptions & { codex?: boolean } = {}): Promise<string[]> {
-  const root = path.resolve(dir);
-  const done = await setupWorkspace(root, { ...o, projectSkills: true });
-  const mcp = mcpCommand(root);
-  await mergeJson(path.join(root, '.mcp.json'), (j) => ({ ...j, mcpServers: { ...(j.mcpServers as object), tutordesk: { type: 'stdio', ...mcp } } }));
-  await mergeJson(path.join(root, 'opencode.json'), (j) => ({ $schema: 'https://opencode.ai/config.json', ...j, mcp: { ...(j.mcp as object), tutordesk: { type: 'local', command: [mcp.command, ...mcp.args], environment: mcp.env, enabled: true } } }));
-  done.push('MCP server for Claude Code (.mcp.json) and OpenCode (opencode.json)');
-  if (o.codex !== false) {
-    await registerCodex(mcp);
-    done.push(`MCP server for Codex (${codexConfig()})`);
   }
   return done;
 }

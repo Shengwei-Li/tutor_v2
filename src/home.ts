@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readJson, writeAtomic } from './files.ts';
 import os from 'node:os';
 import path from 'node:path';
 import { exists } from './proc.ts';
@@ -14,21 +14,22 @@ export function tutordeskHome(): string {
 interface HomeConfig {
   /** The workspace used last: the desk and the agents fall back to it. */
   workspace?: string;
+  /** The agent the tutor picked on the desk. */
+  agent?: string;
 }
 
 const configFile = () => path.join(tutordeskHome(), 'config.json');
 
 export async function readHome(): Promise<HomeConfig> {
-  try {
-    return JSON.parse(await readFile(configFile(), 'utf8')) as HomeConfig;
-  } catch {
-    return {};
-  }
+  return (await readJson<HomeConfig>(configFile())) ?? {};
 }
 
 export async function rememberWorkspace(root: string): Promise<void> {
-  await mkdir(tutordeskHome(), { recursive: true });
-  await writeFile(configFile(), `${JSON.stringify({ ...(await readHome()), workspace: root }, null, 2)}\n`);
+  await writeAtomic(configFile(), `${JSON.stringify({ ...(await readHome()), workspace: root }, null, 2)}\n`);
+}
+
+export async function rememberAgent(agent: string): Promise<void> {
+  await writeAtomic(configFile(), `${JSON.stringify({ ...(await readHome()), agent }, null, 2)}\n`);
 }
 
 /** A folder is a workspace when it has tutordesk.yaml. */

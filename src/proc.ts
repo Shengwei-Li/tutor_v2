@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -76,4 +76,41 @@ export function run(command: string, args: string[], opts: { cwd: string; env?: 
       resolve({ code, output, timedOut });
     });
   });
+}
+
+/** A program to start: the executable and the arguments that come before ours. */
+export interface Program {
+  command: string;
+  prefixArgs: string[];
+}
+
+export async function program(name: string): Promise<Program | null> {
+  const found = await findProgram(name);
+  return found ? { command: found[0]!, prefixArgs: found.slice(1) } : null;
+}
+
+/** Kill a child and everything it started (agents run tool subprocesses). */
+export function killTree(child: ChildProcess): void {
+  if (child.exitCode !== null || child.pid === undefined) return;
+  if (isWin) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+  else child.kill('SIGTERM');
+}
+
+/** Kill the process tree and wait until it has exited (its files and folder are released). */
+export async function stopProcess(child: ChildProcess, timeoutMs = 5000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => child.once('close', () => resolve()));
+  killTree(child);
+  await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))]);
+}
+
+/** Split a byte stream into complete lines, tolerating chunks that end mid-line. */
+export class LineSplitter {
+  private buf = '';
+  push(chunk: string): string[] {
+    this.buf += chunk;
+    const parts = this.buf.split(/\r?\n/);
+    this.buf = parts.pop() ?? '';
+    return parts.filter((l) => l.trim().length > 0);
+  }
 }

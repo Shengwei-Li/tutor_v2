@@ -1,31 +1,32 @@
 # TutorDesk v2
 
-雅思 / PTE 一对一老师的备课工具。老师在自己的 agent（OpenCode、Codex、Claude Code）里说话，agent 按 TutorDesk 的流程备课；老师在浏览器里的「备课台」看课表、确认计划、预览 PDF。
-
-## 三个部分
-
-| 部分 | 是什么 | 谁用 |
-|---|---|---|
-| 技能（skills） | 备课流程和教学标准，标准 `SKILL.md` | agent |
-| `tutordesk` 程序 | MCP 服务器 + 备课台网页 + 排版和检查 | agent 和老师 |
-| 模板 | LaTeX 版式、主题、字体 | 排版时 |
-
-对话、模型、登录、权限都由 agent 负责，TutorDesk 不重做。
+雅思 / PTE 一对一老师的备课工具。一个窗口：左边是课表、学生和 PDF，右边是和 agent 的对话。agent 就是老师电脑上已经登录的 Codex、Claude Code 或 OpenCode，TutorDesk 在内部启动它，不需要 API key。
 
 ## 老师怎么用
 
-1. **装一次:** 下载 TutorDesk，双击。它会自己完成：
-   - 把程序装进 `~/.tutordesk`；
-   - 下载排版引擎；
-   - 接上本机已有的 Codex、Claude Code 和 OpenCode；
-   - 在「文档」里建好 `TutorDesk` 文件夹，放学生资料；
-   - 在桌面放一个快捷方式；
-   - 打开备课台。
-2. **之后:** 打开 agent，直接说话，比如「新学生王一然，高二，雅思 6.5 目标 7，每周二四晚上七点」。
-   - agent 一开，备课台就跟着起来。想看的时候说「打开备课台」，或者双击桌面快捷方式。
-   - 想把学生资料放在别的文件夹，跟 agent 说一声，它会用 `setup_workspace` 建好。
+1. **装一次:** 下载 TutorDesk，双击。它把程序装进 `~/.tutordesk`，下载排版引擎，在「文档」里建好学生文件夹，在桌面放一个快捷方式，然后打开备课台。
+2. **之后:** 双击桌面的 TutorDesk，在右边的对话里说话，比如「新学生王一然，高二，雅思 6.5 目标 7，每周二四晚上七点」。
+   - 「待你处理」里的每一项都有按钮：点「交给 agent」直接开工，点「确认计划」后 agent 自动开始写材料。
+   - 每个学生有自己的对话；首页是通用对话。
 
-老师不用敲任何命令。
+前提：电脑上装好并登录了 Codex、Claude Code、OpenCode 中的至少一个。对话框顶部可以切换。
+
+TutorDesk 不改这些 agent 的任何设置：工具只在每次对话启动时传给它，技能放在学生文件夹里。
+
+## 原理
+
+```
+浏览器页面（备课台 + 对话）
+        │ 本机 127.0.0.1
+tutordesk 程序 ── 启动 ──▶ 已登录的 agent（codex app-server / Claude Agent SDK / opencode acp）
+        │                        │ 读写学生文件夹，按技能里的流程备课
+        │                        ▼
+        └────────────── tutordesk 工具：check_workspace、export_pdf、share_with_parents
+```
+
+- 模型、登录和计费都是 agent 自己的。
+- agent 只能读写学生文件夹，不能联网（Codex 用它自己的沙箱，Claude Code 和 OpenCode 禁用了命令和网络工具）。
+- 学生资料只在本机。
 
 ## 数据：一个学生一个文件夹
 
@@ -42,34 +43,27 @@ students/wang-yiran/
 └── share/            家长页 index.html、课表 lessons.ics
 ```
 
-文件是唯一的数据，备课台、家长页、课表都从这里生成。
+文件是唯一的数据，备课台、家长页、课表都从这里生成。工作区里还有 `AGENTS.md` 和技能（`.agents/skills`、`.claude/skills`），由 TutorDesk 维护。
 
-## 教学流程
+## 教学流程和关卡
 
 诊断 → 课程规划 → 单节计划 → **老师确认** → 写材料 → **检查** → 上课 → 课后记录 → 下一节计划引用记录
 
 代码强制的三条：
 
-1. 计划没确认（`status: approved`），不能出材料 PDF。
-2. 检查没过，不能出 PDF。
-3. 家长页只读画像、规划、课次和分数，从不读 `notes.md` 和课后记录里的老师备注。
+1. **确认只能由老师点按钮完成。** 确认记录连同计划的指纹存在 `~/.tutordesk/approvals.json`，在学生文件夹之外。agent 自己把 `status` 改成 approved 没有用；计划在确认后被改动，要重新确认。
+2. 文档编译出错、文字超出页边，或读取课次文件夹以外的文件，都不出 PDF。
+3. 家长页只读画像字段、规划、课次和最终分数，从不读 `notes.md` 和课后记录里的老师备注。
+4. agent 只能读写工作区里的文件（链接到外面的文件夹也不行），并且不能改 `AGENTS.md`、`tutordesk.yaml`、`.agents/`、`.claude/`、`.tutordesk/`。Codex 在自己的沙箱里改了也没用：每轮结束后这些文件被改回，对话里会写一句。这样学生作文里藏的指令改不了 agent 以后的行为。
+
+## 出问题的时候
+
+- 对话、确认记录和设置都是整份写入，断电不会留下半个文件。读不了的文件另存为 `*.broken-<时间>`，页面顶部说一声，照常工作。
+- agent 中途掉线、或备课台被关掉，这一轮标成「中断」，下面有「重试」。20 分钟没有动静会提示可能卡住，由老师决定停不停。
+- `~/.tutordesk/log.txt` 记录启动、每轮开始结束和错误，不记对话内容和学生姓名。页面底部「出了问题？」可以一键复制版本、agent 状态和最近的日志。
+- 备课台页面只运行自己的脚本（CSP），修改类请求必须来自备课台自己的页面。
 
 其余交给技能和模型：每份材料在给老师前，按教学评审清单自查一遍。
-
-## 备课台
-
-随 agent 启动，也能从桌面快捷方式打开；只在本机，文件一变自动刷新：
-
-- **待你处理**：要确认的计划、要备的课、要写的材料、要记录的课。需要 agent 做的，给一句话，点「复制给 agent」粘贴过去。
-- **本周课表**：每节课一条四段进度（计划、确认、材料、上课），没备的时段也列出来。
-- **学生页**：画像、课程规划、课次；生成家长页。
-- **课次页**：计划、确认按钮、学生版和教师版 PDF。
-
-怎么测试见 [TESTING.md](TESTING.md)。
-
-## 质量
-
-`evals/` 放一组典型学生。改了技能或换了模型，就跑一遍完整流程，按评审清单打分，比较前后。
 
 ## 代码
 
@@ -77,15 +71,18 @@ students/wang-yiran/
 v2/
 ├── skills/             给 agent 的技能（标准 SKILL.md）
 ├── src/                TypeScript；开发时 Node 24 直接运行
+│   ├── agents/         驱动 Codex、Claude Code、OpenCode（一个接口，一条权限规则）
+│   ├── threads.ts      对话：每个学生一个，记录在工作区，agent 进程闲置十分钟后关闭
+│   ├── approvals.ts    老师的确认记录
+│   ├── files.ts        工作区边界、只读区域、整份写入
+│   ├── log.ts          本机日志
+│   ├── desk.ts         备课台页面和接口
+│   ├── chat.ts         对话栏：样式和页面脚本
 │   ├── workspace.ts    学生文件夹的读取和校验
-│   ├── tex.ts          编译 PDF（Tectonic 或系统 XeLaTeX）
-│   ├── tectonic.ts     下载 Tectonic（校验哈希）并缓存离线所需的包
-│   ├── tools.ts        关卡：check_workspace、export_pdf、share_with_parents
-│   ├── mcp.ts          MCP 服务器：找到工作区，随 agent 启动备课台，另有 setup_workspace、open_desk
-│   ├── desk.ts         备课台
+│   ├── tex.ts          编译 PDF；tectonic.ts 下载并缓存排版引擎
+│   ├── tools.ts mcp.ts 给 agent 的工具
 │   ├── share.ts        家长页和 .ics
-│   ├── home.ts         ~/.tutordesk 和「用哪个工作区」
-│   ├── init.ts         建工作区；把技能和服务器接到各 agent
+│   ├── init.ts         建工作区；可选的 connect / disconnect
 │   ├── install.ts      双击安装 / 卸载
 │   └── cli.ts
 ├── scripts/build.mjs   打包成单个程序（Node SEA）
@@ -98,17 +95,21 @@ v2/
 ```bash
 pnpm install
 pnpm test
-pnpm build                  # dist/tutordesk(.exe)
-pnpm tutordesk init <文件夹>  # 自带技能和配置的开发工作区
+pnpm build                                   # dist/tutordesk(.exe)
+pnpm tutordesk init <文件夹>
+pnpm tutordesk open <文件夹> --foreground     # 备课台留在这个终端里
 ```
 
-打推送 `v*` 标签时，GitHub Actions 会分别构建 Windows、macOS 和 Linux 版，并发布到 Releases。
+推送 `v*` 标签时，GitHub Actions 构建 Windows 版并发布到 Releases。macOS 和 Linux 版要等在真机上验证过再加回来（工作流里留了注释）。
+
+想在自己的 agent 里直接用 TutorDesk（不经过备课台）的人，可以运行 `tutordesk connect`，它会把技能和工具装进三个 agent 的用户级配置；`tutordesk disconnect` 撤销。默认不做这一步。
 
 ## 还没做
 
+- 对话里选模型（现在用 agent 的默认模型）。
 - `evals/`：典型学生和评分。
 - 每个学生的版本历史和撤销。
-- macOS 的签名和公证：现在双击未签名程序会被系统拦下。
-- 插件市场（Codex、Claude）上架。
+- 给备课台套一个桌面窗口（现在在浏览器里）。
+- macOS 的签名和公证。
 
 v1（仓库根目录）冻结，只作参考。

@@ -1,9 +1,13 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { markdown } from '../src/md.ts';
 import { createServer, request, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import { CodexSession } from '../src/agents/codex.ts';
+import { approval } from '../src/approvals.ts';
 import { T_EN, createDesk, tasks } from '../src/desk.ts';
 import { listStudents } from '../src/workspace.ts';
 import { buildShare, calendar } from '../src/share.ts';
@@ -57,7 +61,7 @@ describe('desk', () => {
   let server: Server;
   let base: string;
   beforeEach(async () => {
-    const desk = createDesk(root, { lang: 'en', now: () => NOW });
+    const desk = createDesk(root, { lang: 'en', now: () => NOW, agents: [] });
     server = createServer((req, res) => void desk.handle(req, res));
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -92,8 +96,11 @@ describe('desk', () => {
     const page = await (await fetch(`${base}/s/wang-yiran/l/2026-11-05-position`)).text();
     const token = /name="token" value="([0-9a-f]+)"/.exec(page)![1]!;
     const url = `${base}/s/wang-yiran/l/2026-11-05-position/approve`;
-    expect((await fetch(url, { method: 'POST', body: new URLSearchParams({ token: 'forged' }), redirect: 'manual' })).status).toBe(403);
-    expect((await fetch(url, { method: 'POST', body: new URLSearchParams({ token }), redirect: 'manual' })).status).toBe(303);
+    expect((await fetch(url, { method: 'POST', headers: { origin: base }, body: new URLSearchParams({ token: 'forged' }), redirect: 'manual' })).status).toBe(403);
+    // The right token from another site's page, or with no origin at all, is refused too.
+    for (const headers of [{ origin: 'http://evil.example' }, { origin: 'null' }, {}]) expect((await fetch(url, { method: 'POST', headers, body: new URLSearchParams({ token }), redirect: 'manual' })).status).toBe(403);
+    expect(await readFile(path.join(root, 'students/wang-yiran/lessons/2026-11-05-position/plan.md'), 'utf8')).toContain('status: draft');
+    expect((await fetch(url, { method: 'POST', headers: { origin: base }, body: new URLSearchParams({ token }), redirect: 'manual' })).status).toBe(303);
     expect(await readFile(path.join(root, 'students/wang-yiran/lessons/2026-11-05-position/plan.md'), 'utf8')).toContain('status: approved');
   });
 
@@ -105,11 +112,48 @@ describe('desk', () => {
     const status = await new Promise<number | undefined>((resolve) => request(`${base}/`, { headers: { host: 'evil.example' } }, (r) => resolve(r.statusCode)).end());
     expect(status).toBe(403);
   });
+
+  it('runs only its own script, and says where to look when something goes wrong', async () => {
+    const res = await fetch(`${base}/s/wang-yiran`);
+    expect(res.headers.get('content-security-policy')).toMatch(/script-src 'self';/);
+    const html = await res.text();
+    // No inline code: the only scripts are the settings block and /assets/chat.js.
+    expect([...html.matchAll(/<script([^>]*)>/g)].map((m) => m[1])).toEqual([' type="application/json" id="td"', ' src="/assets/chat.js"']);
+    expect(html).not.toMatch(/\son[a-z]+=/);
+    expect((await fetch(`${base}/assets/chat.js`)).headers.get('content-type')).toContain('javascript');
+    expect(html).toContain('href="/problem"');
+    const problem = await (await fetch(`${base}/problem`)).text();
+    expect(problem).toContain('TutorDesk 2.');
+    expect(problem).not.toContain('Wang Yiran');
+  });
+
+  it('serves nothing through a folder linked from elsewhere', async () => {
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'td2-outside-'));
+    try {
+      await mkdir(path.join(outside, 'out'), { recursive: true });
+      await writeFile(path.join(outside, 'out', 'secret.pdf'), '%PDF secret');
+      await symlink(outside, path.join(root, 'students/wang-yiran/lessons/2026-11-09-linked'), 'junction');
+      expect((await fetch(`${base}/files/students/wang-yiran/lessons/2026-11-09-linked/out/secret.pdf`)).status).toBe(404);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('markdown from agents and files', () => {
+  it('escapes HTML and lets links go only to web pages and the workspace', () => {
+    expect(markdown('<script>alert(1)</script> **b**')).toBe('<p>&lt;script&gt;alert(1)&lt;/script&gt; <strong>b</strong></p>');
+    expect(markdown('[x](javascript:alert(1)) [y](file:///etc/passwd) [z](/etc) [w](../../x)')).not.toContain('<a');
+    expect(markdown('[site](https://ielts.org/a?b=1&c=2)')).toBe('<p><a href="https://ielts.org/a?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">site</a></p>');
+    expect(markdown('[plan](students/mina/lessons/2026-11-12-task2/plan.md)')).toBe('<p><a href="/s/mina/l/2026-11-12-task2">plan</a></p>');
+    expect(markdown('[profile](./students/mina/profile.md)')).toBe('<p><a href="/s/mina">profile</a></p>');
+    expect(markdown('`[a](https://x.org)` "q"')).toBe('<p><code>[a](https://x.org)</code> &quot;q&quot;</p>');
+  });
 });
 
 describe('desk idleness', () => {
   it('is idle only while no page is open', async () => {
-    const desk = createDesk(root, { lang: 'en', now: () => NOW });
+    const desk = createDesk(root, { lang: 'en', now: () => NOW, agents: [] });
     const server = createServer((req, res) => void desk.handle(req, res));
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -127,5 +171,59 @@ describe('desk idleness', () => {
       server.closeAllConnections();
       await new Promise<void>((r) => server.close(() => r()));
     }
+  });
+});
+
+describe('desk conversation', () => {
+  const FAKE = fileURLToPath(new URL('./fixtures/fake-agent.mjs', import.meta.url));
+  let server: Server;
+  let base: string;
+  let desk: ReturnType<typeof createDesk>;
+  beforeEach(async () => {
+    desk = createDesk(root, {
+      lang: 'en',
+      now: () => NOW,
+      agents: [{ id: 'codex', label: 'Codex', installed: true, signedIn: true }, { id: 'claude-code', label: 'Claude Code', installed: false, hint: 'Install Claude Code' }],
+      threads: { create: (_a, o) => new CodexSession(o, { executable: { command: process.execPath, prefixArgs: [FAKE, 'codex'] } }) },
+    });
+    server = createServer((req, res) => void desk.handle(req, res));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterEach(async () => {
+    await desk.close();
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+  const token = async () => /"token":"([0-9a-f]+)"/.exec(await (await fetch(`${base}/?static`)).text())![1]!;
+  const thread = async (key: string) => (await (await fetch(`${base}/api/thread?key=${key}`)).json()) as { who: string; html: string; running: boolean; agent: string; agents: { id: string; ready: boolean }[] };
+  const settled = async (key: string) => {
+    for (let i = 0; i < 100; i++) {
+      const t = await thread(key);
+      if (!t.running) return t;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error('turn did not end');
+  };
+
+  it('sends the tutor\'s message to the ready agent and shows the reply', async () => {
+    const t = await token();
+    expect((await fetch(`${base}/api/send`, { method: 'POST', headers: { origin: base }, body: JSON.stringify({ token: 'x', key: 'wang-yiran', text: 'hi' }) })).status).toBe(403);
+    expect((await fetch(`${base}/api/send`, { method: 'POST', headers: { origin: base }, body: JSON.stringify({ token: t, key: 'wang-yiran', text: 'Plan the lesson' }) })).status).toBe(200);
+    const v = await settled('wang-yiran');
+    expect(v).toMatchObject({ who: 'Wang Yiran', agent: 'codex' });
+    expect(v.agents).toEqual([expect.objectContaining({ id: 'codex', ready: true }), expect.objectContaining({ id: 'claude-code', ready: false })]);
+    expect(v.html).toContain('<div class="msg me">Plan the lesson</div>');
+    expect(v.html).toMatch(/<div class="who">Codex<\/div><div class="prose"><p>Hello tutor<\/p>\n<p>Done\.<\/p>/);
+    // The general conversation is a different one.
+    expect((await thread('')).html).toBe('');
+  });
+
+  it('records the approval and hands the materials to the agent in one click', async () => {
+    const url = `${base}/s/wang-yiran/l/2026-11-05-position/approve`;
+    expect((await fetch(url, { method: 'POST', headers: { origin: base }, body: new URLSearchParams({ token: await token() }), redirect: 'manual' })).status).toBe(303);
+    expect(await approval(root, 'wang-yiran', '2026-11-05-position')).toBe('approved');
+    const v = await settled('wang-yiran');
+    expect(v.html).toContain("The plan for Wang Yiran's lesson on 11/05 is approved. Write the materials and export the PDFs.");
   });
 });

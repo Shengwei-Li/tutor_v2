@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TEMPLATES, findEngine } from '../src/tex.ts';
 import { checkWorkspace, exportPdf } from '../src/tools.ts';
+import { approve } from '../src/approvals.ts';
 import { setLessonStatus } from '../src/workspace.ts';
 
 const engine = await findEngine();
@@ -33,19 +34,28 @@ describe('export_pdf gates', () => {
   it('refuses a draft plan, bad names and missing files', async () => {
     await plan('draft');
     await writeFile(path.join(lessonDir(), 'handout.tex'), '');
-    expect((await exportPdf(root, { student: 'mina', lesson: '2026-11-07-peel', file: 'handout.tex' })).text).toMatch(/not approved/);
+    expect((await exportPdf(root, { student: 'mina', lesson: '2026-11-07-peel', file: 'handout.tex' })).text).toMatch(/has not approved/);
     expect((await exportPdf(root, { student: '..', lesson: '2026-11-07-peel', file: 'handout.tex' })).isError).toBe(true);
     expect((await exportPdf(root, { student: 'mina', lesson: '2026-11-07-peel', file: '../x.tex' })).isError).toBe(true);
+    // Writing the status is not approval: only the desk's record counts.
     await setLessonStatus(root, 'mina', '2026-11-07-peel', 'approved');
+    expect((await exportPdf(root, { student: 'mina', lesson: '2026-11-07-peel', file: 'handout.tex' })).text).toMatch(/has no effect/);
+    await approve(root, 'mina', '2026-11-07-peel');
+    // The status moving on keeps the approval; a changed plan loses it.
+    await setLessonStatus(root, 'mina', '2026-11-07-peel', 'ready');
     expect((await exportPdf(root, { student: 'mina', lesson: '2026-11-07-peel', file: 'worksheet.tex' })).text).toMatch(/No worksheet.tex/);
     // Any .tex in the folder can be \input, so one that reads outside blocks every export.
     await writeFile(path.join(lessonDir(), 'notes.tex'), String.raw`\input{../../notes.md}`);
     const r = await exportPdf(root, { student: 'mina', lesson: '2026-11-07-peel', file: 'handout.tex' });
     expect(r.text).toContain('notes.tex reads files outside the lesson folder');
+    await rm(path.join(lessonDir(), 'notes.tex'));
+    await writeFile(path.join(lessonDir(), 'plan.md'), '---\ndate: 2026-11-07\ntopic: Something else\nstatus: approved\n---\n');
+    expect((await exportPdf(root, { student: 'mina', lesson: '2026-11-07-peel', file: 'handout.tex' })).text).toMatch(/changed after the tutor approved/);
   });
 
   it.skipIf(!engine)('exports an approved lesson, and lists what to fix in a broken one', async () => {
-    await plan('approved');
+    await plan('draft');
+    await approve(root, 'mina', '2026-11-07-peel');
     await copyFile(path.join(TEMPLATES, 'samples', 'handout-peel.tex'), path.join(lessonDir(), 'handout.tex'));
     expect((await exportPdf(root, { student: 'mina', lesson: '2026-11-07-peel', file: 'handout.tex', edition: 'teacher' })).text).toMatch(/^Exported students\/mina\/lessons\/2026-11-07-peel\/out\/handout-teacher\.pdf/);
     await writeFile(path.join(lessonDir(), 'broken.tex'), '\\documentclass{article}\n\\begin{document}\n\\notamacro\n\\end{document}\n');

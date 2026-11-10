@@ -3,14 +3,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { getAsset } from 'node:sea';
 import { findWorkspace, isWorkspace, tutordeskHome } from './home.ts';
-import { connectAgents, disconnectAgents, setupWorkspace } from './init.ts';
+import { disconnectAgents, setupWorkspace } from './init.ts';
 import { SEA, VERSION, installedBinary, selfCommand } from './paths.ts';
 import { exists, run } from './proc.ts';
 import { setupTectonic } from './tectonic.ts';
 
 /**
  * Everything a tutor needs, from one double-click: the program and its files in ~/.tutordesk, the PDF
- * engine, the skills and MCP server in each agent on this computer, a workspace in Documents, and a
+ * engine, a workspace in Documents (its skills inside it; the agents' own settings are not touched), and a
  * desktop shortcut to the desk. Running it again updates in place; student files are never touched.
  */
 export async function install(say: (line: string) => void = console.log): Promise<string> {
@@ -19,7 +19,6 @@ export async function install(say: (line: string) => void = console.log): Promis
     await unpack();
   }
   await setupTectonic(say);
-  for (const line of await connectAgents()) say(`Connected ${line}`);
   let workspace = await findWorkspace();
   if (!workspace) {
     workspace = await freeFolder(await documentsFolder());
@@ -59,13 +58,13 @@ async function unpack(): Promise<void> {
   const bin = installedBinary();
   if (path.resolve(process.execPath) !== path.resolve(bin)) {
     await mkdir(path.dirname(bin), { recursive: true });
-    // A running copy cannot be overwritten on Windows; move it aside first.
-    await rm(`${bin}.old`, { force: true });
-    if (await exists(bin)) await rename(bin, `${bin}.old`).catch(() => {});
+    // A running copy (an open desk) cannot be overwritten or deleted on Windows, only renamed: move it
+    // aside under a fresh name, and clear away earlier ones that have since stopped.
+    const dir = path.dirname(bin);
+    for (const f of await readdir(dir)) if (f.includes('.old')) await rm(path.join(dir, f), { force: true }).catch(() => {});
+    if (await exists(bin)) await rename(bin, `${bin}.old${Date.now()}`);
     await copyFile(process.execPath, bin);
     if (process.platform !== 'win32') await chmod(bin, 0o755);
-    // Gone now unless that copy is still running (an open desk); then the next install removes it.
-    await rm(`${bin}.old`, { force: true }).catch(() => {});
   }
 }
 

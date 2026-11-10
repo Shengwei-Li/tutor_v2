@@ -8,11 +8,13 @@ jobs:
   build:
     strategy:
       matrix:
+        # Windows only for now: the macOS and Linux builds have not been tried on a real machine.
+        # When they have, add them back:
+        #   - { os: macos-latest, file: tutordesk, name: TutorDesk-macos-arm64 }
+        #   - { os: macos-13, file: tutordesk, name: TutorDesk-macos-x64 }
+        #   - { os: ubuntu-latest, file: tutordesk, name: TutorDesk-linux-x64 }
         include:
           - { os: windows-latest, file: tutordesk.exe, name: TutorDesk-windows-x64.exe }
-          - { os: macos-latest, file: tutordesk, name: TutorDesk-macos-arm64 }
-          - { os: macos-13, file: tutordesk, name: TutorDesk-macos-x64 }
-          - { os: ubuntu-latest, file: tutordesk, name: TutorDesk-linux-x64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

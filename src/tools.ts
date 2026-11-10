@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { approval } from './approvals.ts';
 import { buildShare } from './share.ts';
 import { readdir, readFile } from 'node:fs/promises';
 import { compile, outsideReads, type Edition, type Engine, type TexError } from './tex.ts';
@@ -57,7 +58,9 @@ export async function exportPdf(root: string, a: { student: string; lesson: stri
   const problems: Problem[] = [];
   const lesson = await readLesson(root, a.student, a.lesson, problems);
   if (!lesson.plan) return fail(`The lesson has no valid plan.md:\n${listProblems(problems)}`);
-  if (lesson.plan.status === 'draft') return fail('The tutor has not approved this plan yet (plan.md status: draft). Show the tutor the plan and wait; set status: approved only when the tutor says so.');
+  const ok = await approval(root, a.student, a.lesson);
+  if (ok === 'none') return fail('The tutor has not approved this plan. Tell them it is ready and wait: they approve with the button on the TutorDesk desk. Writing status: approved into plan.md yourself has no effect.');
+  if (ok === 'changed') return fail('The plan was changed after the tutor approved it. Ask them to approve it again on the desk.');
   if (!lesson.sources.includes(a.file)) return fail(`No ${a.file} in ${a.lesson}. The lesson has: ${lesson.sources.join(', ') || 'no .tex files'}.`);
   const dir = path.join(studentsDir(root), a.student, 'lessons', a.lesson);
   // Every .tex in the folder can be \input, so all of them are checked.

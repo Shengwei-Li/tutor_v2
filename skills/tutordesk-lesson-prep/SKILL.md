@@ -52,9 +52,9 @@ Run `check_workspace` for the student and fix anything it reports.
 
 ## 3. Stop for approval
 
-Summarise the plan in five lines or fewer and ask the tutor to approve it, in the chat or on the TutorDesk desk. **Do not write materials yet.**
+Summarise the plan in five lines or fewer and say it is waiting for their approval on the desk. **Do not write materials yet.**
 
-Set `status: approved` only when the tutor approves in so many words; if they ask for changes, edit the plan and ask again. On the desk, the tutor's approval sets the status for you: re-read `plan.md`, the tutor may also have edited it.
+Only the tutor approves, with the button on the lesson's page. Writing `status: approved` yourself approves nothing: `export_pdf` checks the desk's own record, and a plan changed after approval needs approving again. If the tutor asks for changes, edit the plan and say it is ready to approve. After approval, re-read `plan.md`: the tutor may have edited it.
 
 ## 4. Materials
 

@@ -84,7 +84,7 @@ describe('MCP server', () => {
       expect((await call('check_workspace')).text).toContain(`Workspace: ${folder}`);
       expect((await call('open_desk', { page: 'wang-yiran' })).text).toMatch(/^Opened the desk in the tutor's browser: http:\/\/127\.0\.0\.1:\d+\/s\/wang-yiran\. /);
       const health = await (await fetch(new URL('/health', opened[0]!))).json();
-      expect(health).toEqual({ app: 'tutordesk', root: folder });
+      expect(health).toMatchObject({ app: 'tutordesk', root: folder });
       expect(await readFile(path.join(folder, 'tutordesk.yaml'), 'utf8')).toContain('tutor: "Lin"');
     } finally {
       process.chdir(cwd);

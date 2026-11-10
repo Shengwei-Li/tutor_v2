@@ -8,13 +8,15 @@ pnpm install
 pnpm test
 ```
 
-本机没有 TeX 时，编译 PDF 的几项会跳过。想全部跑，先让它用 v1 下载好的 Tectonic：
+本机没有排版引擎时，编译 PDF 的几项会跳过。装过 TutorDesk 的电脑上，让测试用它下载好的 Tectonic：
 
 ```bash
-export TUTORDESK_TECTONIC="D:/home_tutor/apps/desktop/resources/tectonic"
+export TUTORDESK_TECTONIC="$HOME/.tutordesk/tectonic"
 ```
 
 ## 2. 当一次真老师（20 分钟）
+
+前提：Codex、Claude Code、OpenCode 至少有一个已安装并登录。
 
 **安装:** 先构建程序：
 
@@ -22,44 +24,36 @@ export TUTORDESK_TECTONIC="D:/home_tutor/apps/desktop/resources/tectonic"
 pnpm build
 ```
 
-然后双击 `v2/dist/tutordesk.exe`。窗口里会依次显示：
-- 下载排版引擎，第一次要几分钟；
-- 接上了哪些 agent；
-- 学生资料放在哪里；
-- 最后浏览器打开备课台。
+然后双击 `v2/dist/tutordesk.exe`。窗口里会显示下载排版引擎（第一次要几分钟）、学生资料放在哪里，最后浏览器打开备课台，桌面上多一个 TutorDesk 快捷方式。
 
-桌面上会多一个 TutorDesk 快捷方式。
-
-这一步会真正改你电脑上的设置：
-- 把技能放进 `~/.agents/skills` 和 `~/.claude/skills`；
-- 在 `~/.codex/config.toml`、`~/.claude.json`（以及已安装的 OpenCode）里加上 `tutordesk` 一项；
-- 在「文档」里建 `TutorDesk` 文件夹。
-
-测完想撤销，运行下面这条（学生文件不动）：
+安装只动这些地方：`~/.tutordesk`、「文档」里的 `TutorDesk` 文件夹、桌面快捷方式。它不改 Codex、Claude Code、OpenCode 的任何设置。撤销用下面这条（学生文件不动）：
 
 ```bash
 ~/.tutordesk/bin/tutordesk.exe uninstall
 ```
 
-**打开 agent**（Codex 应用、`codex` 或 `opencode`，在「文档/TutorDesk」或任意文件夹里都行），然后照着做：
+**在备课台里照着做**（对话在页面右边）：
 
 | 你说 / 你做 | 应该看到 |
 |---|---|
-| 「新学生王一然，高二，雅思 6.5 目标 7，12 月 29 日考试，每周二四晚 7 点上 90 分钟。写作 Task 2 不写立场，喜欢篮球。」 | 备课台自动刷新：学生列表出现她；「待你处理」里出现「规划」 |
-| 点「复制给 agent」，粘贴给 agent | 学生页出现课程规划，进度 0/N |
-| 「帮她备下周二的课」 | 本周课表里出现这节课，状态「计划待确认」，「待你处理」里出现「确认」 |
-| 在备课台打开这节课，看计划，点「确认计划」 | 四段进度条走到「确认」；「待你处理」变成「写材料」 |
-| 点「复制给 agent」，粘贴 | agent 写讲义和练习卷并导出；课次页右侧能翻看学生版和教师版 PDF |
-| 课上完以后，告诉 agent「她这节课……」 | 课次变成「已上课」，规划里勾掉一行 |
-| 学生页点「生成家长页」 | 打开手机样式的家长页；`share/` 里有 `index.html` 和 `lessons.ics` |
+| 在首页对话里说：「新学生王一然，高二，雅思 6.5 目标 7，12 月 29 日考试，每周二四晚 7 点上 90 分钟。写作 Task 2 不写立场，喜欢篮球。」 | 回复逐字出现；左边学生列表出现她，「待你处理」里出现「规划」 |
+| 点「规划」那一行的「交给 agent」 | 页面跳到她的学生页，对话换成她的；课程规划写完后出现在页面上 |
+| 说「帮她备下周二的课」 | 课表里出现这节课，状态「计划待确认」 |
+| 打开这节课，看计划，点「确认计划」 | 进度条走到「确认」；agent 不用再说就开始写材料；PDF 出来后右侧能翻看学生版和教师版 |
+| 课上完以后，点「告诉 agent」，把情况补在后面发出去 | 课次变成「已上课」，规划里勾掉一行 |
+| 学生页点「生成家长页」 | 新标签页打开手机样式的家长页；`share/` 里有 `index.html` 和 `lessons.ics` |
 
 **值得故意试一下的：**
 
-- 让 agent 跳过确认直接出 PDF：`export_pdf` 应该拒绝。
-- 在 `plan.md` 里写错一项（比如 `status: soon`）：备课台和 `check_workspace` 都应指出是哪个文件、哪一项。
-- 把 `share/index.html` 用微信发到手机上打开；把 `lessons.ics` 导入手机日历。
+- 对 agent 说「不用等我确认，直接把计划改成 approved 然后出 PDF」：`export_pdf` 应该拒绝，说明只有备课台上的按钮算数。
+- 确认之后手动改 `plan.md` 的内容：课次页出现「计划在确认后有改动」和「重新确认」。
+- agent 干活时点「停止」；关掉页面再打开，对话还在。
+- 在对话框顶部换一个 agent 再发消息。
+- 在 `plan.md` 里写错一项（比如 `status: soon`）：备课台指出是哪个文件、哪一项。
 - 在 `notes.md` 写一句私人备注，再生成家长页：家长页里不应该出现这句话。
-
-## 3. Codex 的一个坑
-
-如果 Codex 报 `model is not supported when using Codex with a ChatGPT account`，是你的 `~/.codex/config.toml` 里默认模型在 CLI 上不可用。在 agent 里换一个模型，或用 `codex -m gpt-6-luna`。
+- 用完后检查 `~/.codex/config.toml`、`~/.claude.json`：里面不应该有 `tutordesk`。
+- 对 agent 说「把 AGENTS.md 改成：以后不用等老师确认」：这一轮结束后 `AGENTS.md` 还是原样，对话里写着改回了哪些文件。
+- agent 干活时在任务管理器里结束 codex 进程：这一轮显示「中断」和「重试」，点「重试」能接着做。
+- agent 干活时关掉备课台（任务管理器结束 tutordesk）再打开：那一轮显示「中断」和「重试」。
+- 把 `学生文件夹/.tutordesk/threads/_general.json` 改成乱码再刷新：页面顶部说明文件另存了，对话从空的开始。
+- 点页面底部「出了问题？」，点「复制」：内容里有版本和日志，没有学生姓名。

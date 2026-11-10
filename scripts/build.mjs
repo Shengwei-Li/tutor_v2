@@ -24,8 +24,9 @@ await build({
   format: 'cjs',
   target: 'node24',
   outfile: path.join(dist, 'tutordesk.cjs'),
-  // paths.ts only reads import.meta.url when not running as the single-file program.
-  logOverride: { 'empty-import-meta': 'silent' },
+  // A CommonJS bundle has no import.meta.url; the Claude Agent SDK needs one when it loads.
+  define: { 'import.meta.url': '__importMetaUrl' },
+  banner: { js: "const __importMetaUrl = require('node:url').pathToFileURL(__filename).href;" },
   logLevel: 'warning',
 });
 
