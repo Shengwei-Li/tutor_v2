@@ -61,12 +61,26 @@ describe('desk', () => {
   let server: Server;
   let base: string;
   beforeEach(async () => {
-    const desk = createDesk(root, { lang: 'en', now: () => NOW, agents: [] });
+    // An agent is ready (so the desk shows the week), but the conversation never starts one.
+    const desk = createDesk(root, { lang: 'en', now: () => NOW, agents: [{ id: 'codex', label: 'Codex', installed: true, signedIn: true }], threads: { agent: async () => null } });
     server = createServer((req, res) => void desk.handle(req, res));
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
   afterEach(() => new Promise<void>((r) => server.close(() => r())));
+
+  it('has its own icon and name for the window', async () => {
+    const png = Buffer.from(await (await fetch(`${base}/icon-192.png`)).arrayBuffer());
+    expect(png.subarray(1, 4).toString()).toBe('PNG');
+    expect(png.readUInt32BE(16)).toBe(192);
+    expect(await (await fetch(`${base}/favicon.svg`)).text()).toMatch(/^<svg/);
+    expect(await (await fetch(`${base}/manifest.webmanifest`)).json()).toMatchObject({ name: 'TutorDesk', display: 'standalone' });
+    const html = await (await fetch(`${base}/s/wang-yiran?static`)).text();
+    expect(html).toContain('<title>Wang Yiran · TutorDesk</title>');
+    expect(html).toContain('<link rel="manifest" href="/manifest.webmanifest">');
+    expect(await (await fetch(`${base}/health`)).json()).toMatchObject({ app: 'tutordesk', pages: 0 });
+    expect(await (await fetch(`${base}/api/students`)).json()).toEqual([{ id: 'wang-yiran', name: 'Wang Yiran', exam: 'IELTS Academic' }]);
+  });
 
   it('lists what needs the tutor, approvals first, with a sentence for the agent', async () => {
     const students = await listStudents(root);
@@ -148,6 +162,58 @@ describe('markdown from agents and files', () => {
     expect(markdown('[plan](students/mina/lessons/2026-11-12-task2/plan.md)')).toBe('<p><a href="/s/mina/l/2026-11-12-task2">plan</a></p>');
     expect(markdown('[profile](./students/mina/profile.md)')).toBe('<p><a href="/s/mina">profile</a></p>');
     expect(markdown('`[a](https://x.org)` "q"')).toBe('<p><code>[a](https://x.org)</code> &quot;q&quot;</p>');
+  });
+});
+
+describe('first time', () => {
+  const serve = async (o: NonNullable<Parameters<typeof createDesk>[1]>) => {
+    // Assigned onto o, so an agents getter is read afresh each time.
+    const desk = createDesk(root, Object.assign(o, { lang: 'en' as const, now: () => NOW }));
+    const server = createServer((req, res) => void desk.handle(req, res));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const token = /"token":"([0-9a-f]+)"/.exec(await (await fetch(`${base}/?static`)).text())![1]!;
+    const post = (p: string, body: object) => fetch(`${base}${p}`, { method: 'POST', headers: { origin: base, 'content-type': 'application/json' }, body: JSON.stringify({ token, ...body }) });
+    return { base, post, close: () => new Promise<void>((r) => server.close(() => r())) };
+  };
+
+  it('with no agent ready, says what each one needs and starts its own sign-in', async () => {
+    const asked: string[] = [];
+    let signedIn = false;
+    const d = await serve({
+      get agents() {
+        return [{ id: 'codex' as const, label: 'Codex', installed: true, signedIn }, { id: 'claude-code' as const, label: 'Claude Code', installed: false }, { id: 'opencode' as const, label: 'OpenCode', installed: false }];
+      },
+      signIn: async (a) => (asked.push(a), true),
+    });
+    try {
+      const html = await (await fetch(`${d.base}/?static`)).text();
+      expect(html).toContain('First, an agent');
+      expect(html).toContain('<button type="button" class="btn small" data-login="codex">Sign in</button>');
+      expect(html).toContain('href="https://claude.com/claude-code" target="_blank" rel="noreferrer">Download</a>');
+      expect(html.match(/btn primary/g)).toHaveLength(1);
+      expect((await d.post('/api/login', { agent: 'codex' })).status).toBe(200);
+      expect(asked).toEqual(['codex']);
+      expect(await (await fetch(`${d.base}/api/agents?agent=codex`)).json()).toEqual({ ready: false });
+      signedIn = true;
+      expect(await (await fetch(`${d.base}/api/agents?agent=codex`)).json()).toEqual({ ready: true });
+    } finally {
+      await d.close();
+    }
+  });
+
+  it('with no students, shows the empty week and offers examples to say', async () => {
+    await rm(path.join(root, 'students'), { recursive: true, force: true });
+    const d = await serve({ agents: [{ id: 'codex', label: 'Codex', installed: true, signedIn: true }], threads: { agent: async () => null } });
+    try {
+      const html = await (await fetch(`${d.base}/?static`)).text();
+      expect(html).toContain('Start with your first student');
+      expect(html).toContain('class="week"');
+      const t = (await (await fetch(`${d.base}/api/thread?key=`)).json()) as { html: string };
+      expect(t.html.match(/class="ex" data-fill=/g)).toHaveLength(3);
+    } finally {
+      await d.close();
+    }
   });
 });
 

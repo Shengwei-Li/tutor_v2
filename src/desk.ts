@@ -5,14 +5,15 @@ import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { parse } from 'yaml';
-import { AGENTS, agentStatus, listModels, nativeEffort, type AgentId, type AgentStatus, type ModelList } from './agents/index.ts';
+import { AGENTS, agentStatus, listModels, nativeEffort, signIn, type AgentId, type AgentStatus, type ModelList } from './agents/index.ts';
 import { approval, approve } from './approvals.ts';
-import { CHAT_CSS, CHAT_SCRIPT, chatShell, renderEntries } from './chat.ts';
+import { CHAT_CSS, CHAT_SCRIPT, chatShell, examples, fileLink, renderEntries } from './chat.ts';
 import { brokenFiles, insideRoot } from './files.ts';
 import { readHome, rememberChoice } from './home.ts';
 import { INBOX_MAX_BYTES, INBOX_MAX_FILES, INBOX_TYPES, checkAttachments, cleanName, refuse, saveUpload, typeOf } from './inbox.ts';
 import { log, logError, tail } from './log.ts';
 import { mcpCommand, setupWorkspace } from './init.ts';
+import { ICON_SVG, MANIFEST, iconIco, iconPng } from './icon.ts';
 import { esc, markdown } from './md.ts';
 import { Threads, type ThreadDeps } from './threads.ts';
 import { exists } from './proc.ts';
@@ -55,6 +56,15 @@ const T = {
       attach: { button: 'Attach', drop: 'Drop files to attach', uploading: 'Uploading…', type: '{x} cannot be attached. Pictures, PDF, Word, text.', size: '{x} is too large (20 MB at most).', many: '10 files at a time at most.' },
       queued: 'QUEUED', waiting: 'WAITING', unqueue: 'Take back',
       menu: { agent: 'AGENT', model: 'MODEL', effort: 'THINKING', byDefault: 'Default', loading: 'Asking the agent…', efforts: { fast: 'Fast', standard: 'Standard', deep: 'Deep' } },
+      jump: { title: 'Go to a student', placeholder: 'Student name…', none: 'No student by that name.', nobody: 'No students yet.' },
+      close: 'Close the conversation',
+      tryThese: 'To begin, tell the agent about a student. For example:',
+      examples: [
+        'New student Wang Yiran, Year 11, IELTS 6.5 aiming for 7, exam on 29 December. Tuesdays and Thursdays at 7 pm, 90 minutes. Writes Task 2 without a position; loves basketball.',
+        'New student Leo Chen, PTE 58 now and needs 65, exam in mid-January. One lesson on Saturdays at 10 am. Read Aloud is too slow.',
+        'What can you do for me?',
+      ],
+      undo: { undo: 'Undo this step', redo: 'Put it back', busy: 'The agent is working on these files. Undo when it has finished.', conflict: 'Changed again since: {x}. Undoing loses those changes.', force: 'Undo anyway' },
       notes: {
         stopped: 'Stopped.',
         failed: (a: string) => `${a} stopped with an error.`,
@@ -65,9 +75,18 @@ const T = {
         restarted: (a: string) => `Could not continue the earlier ${a} conversation, so a new one began.`,
         restored: 'The agent changed its own instructions. They were put back:',
         unsent: 'This message was not sent: the desk closed first.',
+        undone: 'Undone: the files are as they were before this step.',
+        redone: 'Put back.',
+        pdfs: 'Its PDFs were removed; export them again when needed.',
       },
     },
     handAll: 'Hand all to agent', allSent: 'Handed {x} to the agent.', act: { working: 'WORKING', unread: 'NEW REPLY' },
+    conversation: 'Conversation', jumpHint: 'Go to student',
+    setup: {
+      title: 'First, an agent', intro: 'TutorDesk prepares lessons with the Codex, Claude Code or OpenCode on this computer; the model and the bill are theirs. Install one and sign in, and you can begin.',
+      missing: 'not installed', signIn: 'not signed in', ready: 'ready', download: 'Download', login: 'Sign in', waiting: 'Finish signing in, in the browser', recheck: 'I have installed one',
+    },
+    first: { title: 'Start with your first student', say: 'Tell the agent about them in the conversation on the right, the way you would brief a colleague: the exam, their score now and the one they need, the exam date, when you teach them, what is weak.' },
     problem: {
       link: 'Something wrong?', intro: 'Copy this and send it to whoever helps you with TutorDesk. It holds no conversations and no student names.',
       version: 'Version', workspace: 'Workspace', agents: 'Agents', log: 'Recent log', copy: 'Copy', copied: 'Copied', empty: 'Nothing logged yet.',
@@ -104,6 +123,15 @@ const T = {
       attach: { button: '附件', drop: '松开即可附加', uploading: '正在上传…', type: '{x} 不能附加。可以附图片、PDF、Word 和文本。', size: '{x} 太大了（最多 20 MB）。', many: '一次最多 10 个文件。' },
       queued: '排队中', waiting: '等前面的做完', unqueue: '撤回',
       menu: { agent: 'AGENT', model: '模型', effort: '思考', byDefault: '默认', loading: '正在问 agent…', efforts: { fast: '快', standard: '标准', deep: '深入' } },
+      jump: { title: '跳到学生', placeholder: '学生名字…', none: '没有这个名字的学生。', nobody: '还没有学生。' },
+      close: '收起对话',
+      tryThese: '先跟 agent 说说一个学生，比如：',
+      examples: [
+        '新学生王一然，高二，雅思 6.5 目标 7，12 月 29 日考试。每周二、四晚 7 点上 90 分钟。写作 Task 2 不写立场，喜欢篮球。',
+        '新学生 Leo Chen，PTE 现在 58 目标 65，1 月中考试，每周六上午 10 点一节课。口语 Read Aloud 太慢。',
+        '你能帮我做哪些事？',
+      ],
+      undo: { undo: '撤销这一步', redo: '恢复', busy: 'agent 正在改这些文件，等它做完再撤销。', conflict: '这些文件在这之后又改过：{x}。撤销会丢掉这些改动。', force: '仍然撤销' },
       notes: {
         stopped: '已停止。',
         failed: (a: string) => `${a} 出错停下了。`,
@@ -114,9 +142,18 @@ const T = {
         restarted: (a: string) => `没能接上之前的 ${a} 对话，开了一个新的。`,
         restored: 'agent 改动了自己的说明文件，已经改回：',
         unsent: '这条消息没来得及发出：备课台先关了。',
+        undone: '已撤销：文件回到了这一步之前的样子。',
+        redone: '已恢复。',
+        pdfs: '这一步生成的 PDF 已删除，需要时重新生成。',
       },
     },
     handAll: '全部交给 agent', allSent: '已交给 agent：{x} 项。', act: { working: '处理中', unread: '新回复' },
+    conversation: '对话', jumpHint: '跳到学生',
+    setup: {
+      title: '先装好一个 agent', intro: 'TutorDesk 用这台电脑上的 Codex、Claude Code 或 OpenCode 备课，模型和费用都是它们自己的。装好其中一个并登录，就可以开始。',
+      missing: '未安装', signIn: '未登录', ready: '可用', download: '下载', login: '登录', waiting: '在浏览器里完成登录', recheck: '我装好了',
+    },
+    first: { title: '从第一个学生开始', say: '在右边的对话里，像跟同事交代一样说说这个学生：考什么、现在几分、要几分、哪天考、什么时候上课、哪里弱。' },
     problem: {
       link: '出了问题？', intro: '把下面的内容复制给帮你处理 TutorDesk 的人。里面没有对话内容，也没有学生姓名。',
       version: '版本', workspace: '工作区', agents: 'Agent', log: '最近的日志', copy: '复制', copied: '已复制', empty: '还没有日志。',
@@ -221,11 +258,17 @@ const CSS = `
 @font-face{font-family:Plex;src:url(/fonts/IBMPlexSans-SemiBold.otf);font-weight:600}
 @font-face{font-family:PlexMono;src:url(/fonts/IBMPlexMono-Regular.otf);font-weight:400}
 @font-face{font-family:PlexMono;src:url(/fonts/IBMPlexMono-Medium.otf);font-weight:500}
-:root{--paper:#fff;--ink:#111;--mute:#6b6b6b;--rule:#dcdcdc;--accent:#24508f;--on-accent:#fff}
-@media (prefers-color-scheme:dark){:root{--paper:#121212;--ink:#efefef;--mute:#9b9b9b;--rule:#343434;--accent:#94b6ea;--on-accent:#121212}}
+:root{--paper:#fff;--ink:#111;--mute:#6b6b6b;--rule:#dcdcdc;--accent:#24508f;--on-accent:#fff;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--paper:#151515;--ink:#e9e9e6;--mute:#979792;--rule:#323230;--accent:#8fb2e8;--on-accent:#151515;color-scheme:dark}}
 *{box-sizing:border-box;margin:0}
 body{background:var(--paper);color:var(--ink);font:15px/1.55 Plex,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
 a{color:inherit;text-decoration:none}a:hover{text-decoration:underline;text-underline-offset:3px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+kbd{font:500 11px/1 PlexMono,ui-monospace,monospace;letter-spacing:.02em;border:1px solid var(--rule);padding:2px 4px;margin-left:4px}
+.top .jump-hint,.top .chat-toggle{text-decoration:none}.chat-toggle .act{display:none}.app.busy .chat-toggle .act{display:inline}
+.lede{max-width:60ch;font-size:17px;line-height:1.6;margin:-8px 0 8px}
+.rows.setup{max-width:640px;margin-top:28px;border-top:1px solid var(--ink)}.rows.setup li{align-items:center}.rows.setup b{width:130px}
+.actions.start{margin:28px 0 0}
 main{max-width:1200px;width:100%;margin:0 auto;padding:28px 40px 80px}
 .mono{font-family:PlexMono,ui-monospace,monospace;font-variant-numeric:tabular-nums}
 .mute{color:var(--mute)}
@@ -266,8 +309,11 @@ code{font-family:PlexMono,ui-monospace,monospace;font-size:13px}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}.btn.primary:hover{background:var(--ink);border-color:var(--ink);color:var(--paper)}
 .btn.small{font-size:13px;padding:6px 10px;border-width:1px}
 .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-left:auto}form{display:inline}
-.stages{display:flex;gap:0;margin:20px 0 0}.stages span{flex:1;min-width:84px;padding-top:8px;border-top:5px solid var(--rule);font-size:12px;color:var(--mute);margin-right:3px}
-.stages span.on{border-color:var(--ink);color:var(--ink)}.stages.draft span.on{border-color:var(--accent);color:var(--accent)}
+.stages{display:flex;gap:0;margin:20px 0 0}.stages span{position:relative;flex:1;min-width:84px;padding-top:8px;border-top:5px solid var(--rule);font-size:12px;color:var(--mute);margin-right:3px}
+.stages span::before{content:'';position:absolute;left:0;right:0;top:-5px;height:5px;background:var(--ink);transform:scaleX(0);transform-origin:left}
+.stages span.on{color:var(--ink)}.stages span.on::before{transform:none}.stages.draft span.on{color:var(--accent)}.stages.draft span.on::before{background:var(--accent)}
+.stages span.fill::before{animation:fill .18s cubic-bezier(.2,0,0,1) var(--d,0ms) both}
+@keyframes fill{from{transform:scaleX(0)}to{transform:none}}
 .tabs{display:flex;gap:18px;flex-wrap:wrap;margin:2px 0 12px;font-size:14px}.tabs a{color:var(--mute)}.tabs a.on{color:var(--ink);text-decoration:underline;text-underline-offset:5px;text-decoration-thickness:2px}
 iframe{display:block;width:100%;height:80vh;border:1px solid var(--ink);background:#fff}
 .warn{border-top:2px solid var(--accent);padding:10px 0;color:var(--accent)}.warn li{margin:2px 0}
@@ -276,10 +322,19 @@ iframe{display:block;width:100%;height:80vh;border:1px solid var(--ink);backgrou
 .report{font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px 0;border-top:1px solid var(--rule)}
 @media (max-width:900px){main{padding:20px 16px 64px}.cols,.cols3{grid-template-columns:minmax(0,1fr);gap:28px}.week{grid-template-columns:minmax(0,1fr)}
 .day,.day+.day{min-height:0;padding:12px 0;border-left:0;border-top:1px solid var(--rule)}.day .w{display:inline;margin-left:8px}.day .n{display:inline;font-size:22px}
-.tasks li{grid-template-columns:64px minmax(0,1fr);gap:4px 12px}.roster li{display:flex;flex-wrap:wrap;gap:4px 14px}.roster li>a{flex-basis:100%}.tasks li>:nth-child(n+3){grid-column:2}.top nav{display:none}}
+.tasks li{grid-template-columns:64px minmax(0,1fr);gap:4px 12px}.roster li{display:flex;flex-wrap:wrap;gap:4px 14px}.roster li>a{flex-basis:100%}.tasks li>:nth-child(n+3){grid-column:2;justify-self:start}.top nav{display:none}.top{gap:16px}}
+@media (max-width:600px){.top .jump-hint,.top .date{display:none}.top .chat-toggle{margin-left:auto}.stages span{min-width:0}}
 `;
 
 class NotFound extends Error {}
+
+const ICONS: Record<string, { type: string; body: () => string | Buffer }> = {
+  '/favicon.svg': { type: 'image/svg+xml', body: () => ICON_SVG },
+  '/favicon.ico': { type: 'image/x-icon', body: () => iconIco([16, 32, 48]) },
+  '/icon-192.png': { type: 'image/png', body: () => iconPng(192) },
+  '/icon-512.png': { type: 'image/png', body: () => iconPng(512) },
+  '/manifest.webmanifest': { type: 'application/manifest+json', body: () => MANIFEST },
+};
 
 /**
  * Every desk page: its own scripts, styles, fonts and frames only. Agent replies are escaped already;
@@ -303,7 +358,7 @@ export interface Desk {
 
 export function createDesk(
   root: string,
-  opts: { lang?: Lang; now?: () => Date; /** Tests: the agents on this computer, their models, and scripted sessions. */ agents?: AgentStatus[]; models?: (agent: AgentId) => Promise<ModelList>; threads?: Partial<ThreadDeps> } = {},
+  opts: { lang?: Lang; now?: () => Date; /** Tests: the agents on this computer, their models, and scripted sessions. */ agents?: AgentStatus[]; models?: (agent: AgentId) => Promise<ModelList>; signIn?: (agent: AgentId) => Promise<boolean>; threads?: Partial<ThreadDeps> } = {},
 ): Desk {
   const token = randomBytes(16).toString('hex');
   const now = opts.now ?? (() => new Date());
@@ -356,6 +411,8 @@ export function createDesk(
     today: now,
     ...opts.threads,
   });
+  // Old undo steps go, a while after start-up so the first page is not kept waiting.
+  setTimeout(() => void threads.history.prune().catch((e: unknown) => void logError('prune', e)), 5_000).unref();
 
   async function config(): Promise<{ lang: Lang; studio?: string }> {
     const c = ((await readFile(path.join(root, 'tutordesk.yaml'), 'utf8').then(parse, () => null)) ?? {}) as { language?: string; studio?: string };
@@ -395,11 +452,14 @@ export function createDesk(
       waiting: c.waiting,
       unqueue: c.unqueue,
       menu: c.menu,
+      undo: c.undo,
+      jump: c.jump,
+      setup: { waiting: t.setup.waiting },
       attach: { ...c.attach, types: Object.keys(INBOX_TYPES), max: INBOX_MAX_BYTES, count: INBOX_MAX_FILES },
       allSent: t.allSent,
     }).replace(/</g, '\\u003c');
-    return `<!doctype html><html lang="${lang === 'zh' ? 'zh-CN' : 'en'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${CSS}${CHAT_CSS}</style></head><body><div class="app"><main id="view" data-thread="${esc(thread)}" data-title="${esc(title)}">
-<header class="top"><a class="brand" href="/">TutorDesk</a><nav><a href="/"${here === 'week' ? ' aria-current="page"' : ''}>${esc(t.thisWeek)}</a><a href="/#students"${here === 'students' ? ' aria-current="page"' : ''}>${esc(t.students)}</a></nav><span class="date mono">${iso(d).replace(/-/g, '.')} ${esc(t.weekdays[(d.getDay() + 6) % 7]!)}</span></header>
+    return `<!doctype html><html lang="${lang === 'zh' ? 'zh-CN' : 'en'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title === 'TutorDesk' ? title : `${title} · TutorDesk`)}</title><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#121212" media="(prefers-color-scheme: dark)"><style>${CSS}${CHAT_CSS}</style></head><body><div class="app"><main id="view" data-thread="${esc(thread)}" data-title="${esc(title === 'TutorDesk' ? title : `${title} · TutorDesk`)}">
+<header class="top"><a class="brand" href="/">TutorDesk</a><nav><a href="/"${here === 'week' ? ' aria-current="page"' : ''}>${esc(t.thisWeek)}</a><a href="/#students"${here === 'students' ? ' aria-current="page"' : ''}>${esc(t.students)}</a></nav><span class="date mono">${iso(d).replace(/-/g, '.')} ${esc(t.weekdays[(d.getDay() + 6) % 7]!)}</span><button type="button" class="link jump-hint" data-jump>${esc(t.jumpHint)} <kbd>Ctrl K</kbd></button><button type="button" class="link chat-toggle" data-chat-toggle>${esc(t.conversation)}<span class="act working">${esc(t.act.working)}</span></button></header>
 ${broken}${body}<footer class="foot"><a href="/problem">${esc(t.problem.link)}</a></footer></main>${chatShell(t.chat)}</div><script type="application/json" id="td">${settings}</script><script src="/assets/chat.js"></script></body></html>`;
   };
 
@@ -424,7 +484,25 @@ ${broken}${body}<footer class="foot"><a href="/problem">${esc(t.problem.link)}</
     );
   }
 
+  /** No agent ready: what each one needs, with the way to get it. */
+  function setup(t: Text, list: AgentStatus[]): string {
+    const s = t.setup;
+    const rows = AGENTS.map((a) => {
+      const st = list.find((x) => x.id === a.id);
+      const word = !st?.installed ? s.missing : st.signedIn === false ? s.signIn : s.ready;
+      const action = !st?.installed
+        ? `<a class="btn small" href="${esc(a.install)}" target="_blank" rel="noreferrer">${esc(s.download)}</a>`
+        : st.signedIn === false
+          ? `<button type="button" class="btn small" data-login="${esc(a.id)}">${esc(s.login)}</button>`
+          : '';
+      return `<li><b>${esc(a.label)}</b><span class="st mute grow">${esc(word)}</span>${action}</li>`;
+    }).join('');
+    return `<div class="hero"><h1>${esc(s.title)}</h1></div><p class="lede">${esc(s.intro)}</p><ul class="rows setup">${rows}</ul><div class="actions start"><button type="button" class="btn primary" data-recheck>${esc(s.recheck)}</button></div>`;
+  }
+
   async function home(url: URL, lang: Lang, t: Text): Promise<string> {
+    const list = await agents();
+    if (!list.some(ready)) return page(lang, t, 'TutorDesk', 'week', setup(t, list));
     const students = await listStudents(root);
     const today = now();
     const offset = Number(url.searchParams.get('w') ?? 0) || 0;
@@ -463,6 +541,10 @@ ${broken}${body}<footer class="foot"><a href="/problem">${esc(t.problem.link)}</
       })
       .join('');
 
+    const weekLabel = `<div class="label"><b>${esc(offset === 0 ? t.thisWeek : t.week)}</b><span class="mono">${md(iso(monday))} – ${md(iso(sunday))}</span><span style="margin-left:auto;display:flex;gap:16px"><a href="/?w=${offset - 1}">${esc(t.prev)}</a>${offset ? `<a href="/">${esc(t.thisWeek)}</a>` : ''}<a href="/?w=${offset + 1}">${esc(t.next)}</a></span></div>`;
+    // An empty workspace: one sentence, the empty week, and examples in the conversation.
+    if (!students.length) return page(lang, t, 'TutorDesk', 'week', `<div class="hero"><h1>${esc(t.first.title)}</h1></div><p class="lede">${esc(t.first.say)}</p><section>${weekLabel}<div class="week">${days}</div></section>`);
+
     const roster = students.length
       ? `<ul class="rows roster">${students
           .map((s) => {
@@ -482,7 +564,7 @@ ${broken}${body}<footer class="foot"><a href="/problem">${esc(t.problem.link)}</
       'week',
       `<div class="hero"><h1>${esc(t.todo)}</h1><span class="mono mute" style="font-size:20px">${todo.length}</span>${handAll}</div>
 ${taskList}
-<section><div class="label"><b>${esc(offset === 0 ? t.thisWeek : t.week)}</b><span class="mono">${md(iso(monday))} – ${md(iso(sunday))}</span><span style="margin-left:auto;display:flex;gap:16px"><a href="/?w=${offset - 1}">${esc(t.prev)}</a>${offset ? `<a href="/">${esc(t.thisWeek)}</a>` : ''}<a href="/?w=${offset + 1}">${esc(t.next)}</a></span></div>
+<section>${weekLabel}
 <div class="week">${days}</div></section>
 <section id="students"><div class="label"><b>${esc(t.students)}</b><span class="mono">${students.length}</span></div>${roster}</section>`,
     );
@@ -676,7 +758,7 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
         return json({ file: await saveUpload(root, key, name, data, now()) });
       }
       if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
-        let a: { token?: string; key?: string; text?: string; agent?: string; files?: unknown; id?: string; model?: string; effort?: string };
+        let a: { token?: string; key?: string; text?: string; agent?: string; files?: unknown; id?: string; model?: string; effort?: string; step?: unknown; redo?: unknown; force?: unknown };
         try {
           a = JSON.parse(await raw(req)) as typeof a;
         } catch {
@@ -687,6 +769,23 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
         if (key !== '' && !ID.test(key)) return json({ error: 'Not a student' }, 400);
         try {
           if (url.pathname === '/api/send') return json(await threads.send(key, String(a.text ?? '').slice(0, 20_000), await checkAttachments(root, key, a.files)));
+          if (url.pathname === '/api/undo') {
+            const step = Number(a.step);
+            if (!Number.isSafeInteger(step)) return json({ error: 'Bad request' }, 400);
+            const r = await threads.undo(key, step, { redo: a.redo === true, force: a.force === true });
+            if ('busy' in r) return json({ error: t.chat.undo.busy }, 409);
+            if ('conflict' in r) return json({ conflict: r.conflict.map((f) => fileLink(f, t.chat, key).label) });
+            return json({ ok: true });
+          }
+          if (url.pathname === '/api/login') {
+            const id = AGENTS.find((x) => x.id === a.agent)?.id;
+            if (!id || !(await (opts.signIn ?? signIn)(id))) return json({ error: t.setup.missing }, 409);
+            return json({ ok: true });
+          }
+          if (url.pathname === '/api/recheck') {
+            status = undefined;
+            return json({ ok: true });
+          }
           if (url.pathname === '/api/stop') await threads.stop(key);
           else if (url.pathname === '/api/unqueue') await threads.unqueue(key, String(a.id ?? ''));
           else if (url.pathname === '/api/choice' && AGENTS.some((x) => x.id === a.agent)) {
@@ -707,6 +806,18 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
         }
         return json({ ok: true });
       }
+      if (url.pathname === '/api/students') {
+        return json((await listStudents(root)).map((s) => ({ id: s.id, name: s.profile?.name ?? s.id, exam: s.profile ? (EXAM[s.profile.exam] ?? s.profile.exam) : '' })));
+      }
+      // While the tutor signs an agent in, the page asks again and again: just that agent, asked afresh.
+      if (url.pathname === '/api/agents') {
+        const id = AGENTS.find((x) => x.id === url.searchParams.get('agent'))?.id;
+        if (!id) throw new NotFound();
+        const one = (opts.agents ? opts.agents.filter((x) => x.id === id) : await agentStatus([id]))[0];
+        const ok = !!one && ready(one);
+        if (ok) status = undefined;
+        return json({ ready: ok });
+      }
       if (url.pathname === '/api/models') {
         const id = AGENTS.find((x) => x.id === url.searchParams.get('agent'))?.id;
         const status = (await agents()).find((x) => x.id === id);
@@ -717,14 +828,14 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
         const key = url.searchParams.get('key') ?? '';
         if (key !== '' && !ID.test(key)) throw new NotFound();
         const part = url.searchParams.get('part');
-        if (part) return json({ html: renderEntries(await threads.older(key, Number(part)), t.chat, key) });
         const v = await threads.view(key);
+        if (part) return json({ html: renderEntries(await threads.older(key, Number(part)), t.chat, key, v) });
         const who = key ? ((await readStudent(root, key).catch(() => null))?.profile?.name ?? key) : t.chat.general;
         const list = await agents();
         const choices = (await readHome()).choices ?? {};
         return json({
           who,
-          html: renderEntries(v.entries, t.chat, key),
+          html: !v.entries.length && !key && list.some(ready) && !(await listStudents(root)).length ? examples(t.chat) : renderEntries(v.entries, t.chat, key, v),
           seq: v.seq,
           running: v.running,
           stalled: v.stalled,
@@ -761,10 +872,17 @@ ${stages}${fixes(s, t, `/lessons/${lessonId}/`)}
       }
       if (url.pathname === '/health') {
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ app: 'tutordesk', root: path.resolve(root), version: VERSION }));
+        res.end(JSON.stringify({ app: 'tutordesk', root: path.resolve(root), version: VERSION, pages: clients.size }));
         return;
       }
       if (url.pathname === '/') return html(await home(url, lang, t));
+      // The window's icon and name (the app window and the taskbar use them).
+      const icon = ICONS[url.pathname];
+      if (icon) {
+        res.writeHead(200, { 'content-type': icon.type, 'cache-control': 'max-age=86400', 'x-content-type-options': 'nosniff' });
+        res.end(icon.body());
+        return;
+      }
       const font = /^\/fonts\/([\w-]+\.otf)$/.exec(url.pathname);
       if (font && PLEX.includes(font[1]!)) {
         res.writeHead(200, { 'content-type': 'font/otf', 'cache-control': 'max-age=86400' });
@@ -878,7 +996,3 @@ export async function startDetachedDesk(root: string, port = DESK_PORT): Promise
   throw new Error('The desk did not start.');
 }
 
-export function openBrowser(url: string): void {
-  const opener = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
-  spawn(opener[0] as string, opener[1] as string[], { stdio: 'ignore', detached: true }).unref();
-}

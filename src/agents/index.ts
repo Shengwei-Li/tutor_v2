@@ -1,5 +1,6 @@
 import os from 'node:os';
 import { program, run } from '../proc.ts';
+import { openConsole } from '../window.ts';
 import { AcpSession } from './acp.ts';
 import { ClaudeCodeSession, claudeEnv } from './claude.ts';
 import { CodexSession } from './codex.ts';
@@ -13,6 +14,18 @@ export const AGENTS: { id: AgentId; label: string; program: string; signIn: stri
   { id: 'claude-code', label: 'Claude Code', program: 'claude', signIn: 'claude auth login', install: 'https://claude.com/claude-code' },
   { id: 'opencode', label: 'OpenCode', program: 'opencode', signIn: 'opencode auth login', install: 'https://opencode.ai' },
 ];
+
+/**
+ * Start the agent's own sign-in in a window of its own (it opens the browser). False when the agent is
+ * not installed. TutorDesk never sees what the tutor types there.
+ */
+export async function signIn(id: AgentId): Promise<boolean> {
+  const a = AGENTS.find((x) => x.id === id);
+  const exe = a && (await program(a.program));
+  if (!a || !exe) return false;
+  await openConsole(id, exe.command, [...exe.prefixArgs, ...a.signIn.split(' ').slice(1)], id === 'claude-code' ? claudeEnv() : undefined);
+  return true;
+}
 
 export const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
 
@@ -28,9 +41,9 @@ export function createSession(agent: AgentId, opts: SessionStart): AgentSession 
 }
 
 /** Installed? Signed in? Asked of each agent's own program, without starting a conversation. */
-export async function agentStatus(): Promise<AgentStatus[]> {
+export async function agentStatus(only?: AgentId[]): Promise<AgentStatus[]> {
   return Promise.all(
-    AGENTS.map(async (a): Promise<AgentStatus> => {
+    AGENTS.filter((a) => !only || only.includes(a.id)).map(async (a): Promise<AgentStatus> => {
       const exe = await program(a.program);
       if (!exe) return { id: a.id, label: a.label, installed: false, hint: `Install ${a.label}: ${a.install}` };
       // Claude Code answers for the tutor's own sign-in only outside another Claude Code session's environment.

@@ -2,7 +2,8 @@ import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { openBrowser, startDesk } from './desk.ts';
+import { startDesk } from './desk.ts';
+import { openWindow } from './window.ts';
 import { findWorkspace } from './home.ts';
 import { setupWorkspace } from './init.ts';
 import { checkWorkspace, exportPdf, shareWithParents, type ToolResult } from './tools.ts';
@@ -72,7 +73,7 @@ export function createServer(version: string, o: ServerOptions = {}): McpServer 
         const base = await desk(root);
         const parts = (page ?? '').split('/').filter((p) => /^[a-z0-9][a-z0-9-]*$/.test(p));
         const url = parts.length === 2 ? `${base}s/${parts[0]}/l/${parts[1]}` : parts.length === 1 ? `${base}s/${parts[0]}` : base;
-        (o.open ?? openBrowser)(url);
+        void (o.open ?? openWindow)(url);
         return { text: `Opened the desk in the tutor's browser: ${url}. There is nothing for you to check there; tell the tutor what to look at.` };
       }),
   );

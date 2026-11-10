@@ -6,6 +6,7 @@ import { findWorkspace, isWorkspace, tutordeskHome } from './home.ts';
 import { disconnectAgents, setupWorkspace } from './init.ts';
 import { SEA, VERSION, installedBinary, selfCommand } from './paths.ts';
 import { exists, run } from './proc.ts';
+import { iconIco } from './icon.ts';
 import { setupTectonic } from './tectonic.ts';
 
 /**
@@ -34,6 +35,8 @@ export async function uninstall(say: (line: string) => void = console.log): Prom
   for (const line of await disconnectAgents()) say(`Disconnected ${line}`);
   await rm(await shortcutPath(), { force: true });
   for (const d of ['bin', 'app', 'tectonic']) await rm(path.join(tutordeskHome(), d), { recursive: true, force: true });
+  // The desk window's own browser profile, its icon and the sign-in scripts (a window still open keeps its profile).
+  for (const f of ['window', 'tutordesk.ico', 'signin-codex.cmd', 'signin-claude-code.cmd', 'signin-opencode.cmd']) await rm(path.join(tutordeskHome(), f), { recursive: true, force: true }).catch(() => {});
   say('TutorDesk is removed. Your student files are where they were.');
 }
 
@@ -114,8 +117,11 @@ async function shortcut(): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
   if (process.platform === 'win32') {
     const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+    const icon = path.join(tutordeskHome(), 'tutordesk.ico');
+    await mkdir(tutordeskHome(), { recursive: true });
+    await writeFile(icon, iconIco());
     // WindowStyle 7: start minimized, so the moment the program needs to hand the desk off is not a flashing window.
-    const ps = `$s=(New-Object -ComObject WScript.Shell).CreateShortcut(${q(file)});$s.TargetPath=${q(self.command)};$s.Arguments=${q(args.map((a) => `"${a}"`).join(' '))};$s.WorkingDirectory=${q(os.homedir())};$s.Description='TutorDesk';$s.WindowStyle=7;$s.Save()`;
+    const ps = `$s=(New-Object -ComObject WScript.Shell).CreateShortcut(${q(file)});$s.TargetPath=${q(self.command)};$s.Arguments=${q(args.map((a) => `"${a}"`).join(' '))};$s.WorkingDirectory=${q(os.homedir())};$s.Description='TutorDesk';$s.IconLocation=${q(`${icon},0`)};$s.WindowStyle=7;$s.Save()`;
     const r = await run('powershell', ['-NoProfile', '-Command', ps], { cwd: os.homedir(), timeoutMs: 20_000 });
     if (r.code !== 0) throw new Error(`Could not create the desktop shortcut: ${r.output.trim()}`);
   } else if (process.platform === 'darwin') {

@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { openBrowser, startDesk, startDetachedDesk } from './desk.ts';
+import { startDesk, startDetachedDesk } from './desk.ts';
 import { findWorkspace } from './home.ts';
 import { connectAgents, disconnectAgents, setupWorkspace } from './init.ts';
 import { install, needsInstall, uninstall } from './install.ts';
 import { serveMcp } from './mcp.ts';
 import { SEA, VERSION } from './paths.ts';
 import { checkWorkspace } from './tools.ts';
+import { focusWindow, openWindow } from './window.ts';
 
 const USAGE = `TutorDesk ${VERSION}: lesson preparation for one-to-one IELTS and PTE tutors
 
@@ -49,7 +50,12 @@ async function main(): Promise<void> {
     // Normally the desk runs on its own, without a window; --foreground keeps it here (development).
     const url = values.foreground ? await startDesk(root, { port }) : await startDetachedDesk(root, port);
     console.log(`TutorDesk desk: ${url}${values.foreground ? '  (Ctrl+C to stop)' : ''}`);
-    if (!values['no-browser']) openBrowser(url);
+    if (values['no-browser']) return;
+    // Double-clicked again: the window already open comes to the front instead of a second one.
+    const pages = await fetch(new URL('/health', url), { signal: AbortSignal.timeout(2000) })
+      .then((r) => r.json() as Promise<{ pages?: number }>)
+      .then((h) => h.pages ?? 0, () => 0);
+    if (!(pages > 0 && (await focusWindow()))) await openWindow(url);
   }
 
   switch (values.help ? 'help' : command) {

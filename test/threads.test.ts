@@ -191,7 +191,36 @@ describe('what the agent does, shown', () => {
       role: 'files',
       files: ['students/mina/lessons/2026-11-12-task2/out/handout.pdf', 'students/mina/lessons/2026-11-12-task2/plan.md', 'students/mina/roadmap.md'],
       at: expect.any(String),
+      step: expect.any(Number),
     });
+  });
+
+  it('undoes a turn: the lesson it made goes, the note can put it back', async () => {
+    await threads.send('mina', 'write please');
+    await ended('mina');
+    const v = await threads.view('mina');
+    const step = (v.entries.at(-1) as { step: number }).step;
+    expect(v.undo).toBe(step);
+    expect(await threads.undo('mina', step)).toEqual({ done: true });
+    const lesson = path.join(root, 'students/mina/lessons');
+    expect(await readdir(lesson).catch(() => null)).toBeNull();
+    const after = await threads.view('mina');
+    expect(after.entries.at(-1)).toMatchObject({ role: 'system', kind: 'undone', step, pdfs: 1 });
+    expect(after).toMatchObject({ undo: undefined, redo: step });
+    expect(events.some(([k, e]) => k === 'mina' && e.type === 'saved')).toBe(true);
+    await threads.undo('mina', step, { redo: true });
+    expect(await readFile(path.join(lesson, '2026-11-12-task2/plan.md'), 'utf8')).toContain('topic: Task 2');
+    expect((await threads.view('mina')).entries.at(-1)).toMatchObject({ kind: 'redone' });
+  });
+
+  it('does not undo while an agent works in the same files', async () => {
+    await threads.send('mina', 'write please');
+    await ended('mina');
+    const step = (await threads.view('mina')).undo!;
+    await threads.send('', 'hang');
+    expect(await threads.undo('mina', step)).toEqual({ done: false, busy: true });
+    await threads.stop('');
+    await ended('');
   });
 
   it('sends attached pictures as image input and names every attachment in the message', async () => {

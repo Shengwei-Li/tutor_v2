@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { createSession, type AgentId, type AgentSession, type McpLaunch, type PlanItem, type SessionStart, type ToolKind } from './agents/index.ts';
-import { changedSince, readJson, restoreProtected, snapshotProtected, stamps, writeAtomic, type Snapshot } from './files.ts';
+import { changedSince, readJson, restoreProtected, snapshotProtected, writeAtomic, type Snapshot } from './files.ts';
+import { History, snapshot, type Snap } from './history.ts';
 import { attachmentNote, images } from './inbox.ts';
 import { log, logError } from './log.ts';
 import { ID, readStudent } from './workspace.ts';
@@ -32,6 +33,10 @@ export type NoteKind =
   | 'restored'
   /** A queued message was never sent: the desk closed first. */
   | 'unsent'
+  /** The tutor took a step back; `text` lists the files. */
+  | 'undone'
+  /** …and put it back. */
+  | 'redone'
   /** Something the agent itself reported. */
   | 'notice';
 
@@ -42,8 +47,8 @@ export type Entry =
   /** The agent's task list as the turn left it. */
   | { role: 'plan'; items: PlanItem[]; at: string }
   /** Files the turn wrote, relative to the workspace. */
-  | { role: 'files'; files: string[]; at: string }
-  | { role: 'system'; text: string; at: string; kind?: NoteKind; agent?: AgentId; /** The message to send again. */ retry?: string; retryFiles?: string[] };
+  | { role: 'files'; files: string[]; at: string; /** The turn's step in the history, when it changed anything. */ step?: number }
+  | { role: 'system'; text: string; at: string; kind?: NoteKind; agent?: AgentId; /** The message to send again. */ retry?: string; retryFiles?: string[]; /** Undone / redone: which step, and how many PDFs went with it. */ step?: number; pdfs?: number };
 
 /** A message waiting to be sent. */
 export interface Queued {
@@ -79,6 +84,8 @@ export type ThreadEvent =
   | { type: 'plan'; items: PlanItem[] }
   | { type: 'queue'; items: Queued[] }
   | { type: 'stalled' }
+  /** Entries were added outside a turn (an undo). */
+  | { type: 'saved' }
   | { type: 'end' };
 
 export interface ThreadView {
@@ -95,7 +102,12 @@ export interface ThreadView {
   queue: Queued[];
   /** Older parts of the conversation, newest is this number. */
   older: number;
+  /** The step undo would take back, and the one redo would put back. */
+  undo?: number;
+  redo?: number;
 }
+
+export type UndoOutcome = { done: true } | { done: false; conflict: string[] } | { done: false; busy: true };
 
 /** Each conversation: working now, or finished with a reply the tutor has not opened. */
 export type Activity = Record<string, 'working' | 'unread'>;
@@ -167,10 +179,15 @@ export class Threads {
   /** The protected files as they were when the first of the running turns began. */
   private baseline: Promise<Snapshot> | null = null;
   private turnsRunning = 0;
+  /** Every turn's changes, to take back. */
+  readonly history: History;
+  /** For each running turn, the other conversations that worked while it did. */
+  private during = new Map<string, Set<string>>();
 
   constructor(root: string, deps: ThreadDeps) {
     this.root = root;
     this.deps = deps;
+    this.history = new History(root);
   }
 
   /** Events are numbered per conversation, so a page loading mid-turn knows which ones it already has. */
@@ -236,7 +253,9 @@ export class Threads {
     const t = await this.load(key);
     const on = this.busy.has(key);
     if (this.unread.delete(key)) this.deps.activity?.();
+    const h = await this.history.state(key).catch(() => ({}) as { undo?: number; redo?: number });
     return {
+      ...h,
       seq: this.seq.get(key) ?? 0,
       entries: t.entries,
       running: on,
@@ -456,8 +475,11 @@ export class Threads {
       }
     }, Math.max(10, Math.min(60_000, stallMs / 4)));
     watch.unref();
-    const { dir, prefix } = this.scope(key);
-    const before = await stamps(dir);
+    const { prefix } = this.scope(key);
+    // Unreadable now means nothing to compare with later: then the turn is not recorded at all.
+    const before = await snapshot(this.root, prefix).catch((e: unknown) => (void logError('snapshot', e), null));
+    this.during.set(key, new Set([...this.busy].filter((k) => k !== key)));
+    for (const [k, s] of this.during) if (k !== key) s.add(key);
     await this.beginGuard();
     try {
       const text = msg.text + attachmentNote(msg.files);
@@ -507,12 +529,14 @@ export class Threads {
       const restored = await this.endGuard();
       // The task list leads the turn; the files it wrote follow the reply.
       if (l.plan?.length) done.unshift({ role: 'plan', items: l.plan, at: now() });
-      const wrote = changedSince(before, await stamps(dir).catch(() => new Map<string, string>()))
-        .map((f) => prefix + f)
-        .filter(worthShowing)
-        .sort()
-        .slice(0, 12);
-      if (wrote.length) done.push({ role: 'files', files: wrote, at: now() });
+      const after: Snap | null = before && (await snapshot(this.root, prefix).catch((e: unknown) => (void logError('snapshot', e), null)));
+      const wrote = before && after ? changedSince(before.stamps, after.stamps).filter(worthShowing).sort().slice(0, 12) : [];
+      // The general conversation leaves out students whose own conversation worked at the same time.
+      const others = [...(this.during.get(key) ?? [])];
+      this.during.delete(key);
+      const skip = key ? [] : others.filter(Boolean).map((k) => `students/${k}/`);
+      const step = before && after ? await this.history.record(key, before, after, skip).catch((e: unknown) => (void logError('history', e), null)) : null;
+      if (wrote.length || step) done.push({ role: 'files', files: wrote, at: now(), ...(step ? { step } : {}) });
       if (restored.length) {
         void log('restored', { thread: key || 'general', files: restored.join(',') });
         done.push({ role: 'system', kind: 'restored', text: restored.join(', '), at: now() });
@@ -537,6 +561,23 @@ export class Threads {
       // The page hears "end" only after the entries are saved, so what it then loads is complete.
       this.emit(key, { type: 'end' });
     }
+  }
+
+  /**
+   * Take back the conversation's latest step (or, `redo`, put back the one undone last). Not while
+   * an agent is working in the same files. Files changed since are listed first, unless `force`.
+   */
+  async undo(key: string, step: number, o: { redo?: boolean; force?: boolean } = {}): Promise<UndoOutcome> {
+    this.file(key);
+    if (this.busy.has(key) || (key === '' ? this.busy.size > 0 : this.busy.has(''))) return { done: false, busy: true };
+    const out = await (o.redo ? this.history.redo(key, step, o.force) : this.history.undo(key, step, o.force));
+    if (!out.done) return out;
+    void log(o.redo ? 'redo' : 'undo', { thread: key || 'general', files: out.files.length });
+    await this.update(key, (t) => {
+      t.entries.push({ role: 'system', kind: o.redo ? 'redone' : 'undone', step, text: out.files.join(', '), ...(out.pdfs ? { pdfs: out.pdfs } : {}), at: now() });
+    });
+    this.emit(key, { type: 'saved' });
+    return { done: true };
   }
 
   /** Stop the turn. Pressed while the agent is still starting, the message is held back instead. */

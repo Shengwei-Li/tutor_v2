@@ -101,7 +101,7 @@ export async function restoreProtected(root: string, before: Snapshot): Promise<
 }
 
 /** Write a file whole or not at all. */
-export async function writeAtomic(file: string, text: string): Promise<void> {
+export async function writeAtomic(file: string, text: string | Uint8Array): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   await writeFile(tmp, text);

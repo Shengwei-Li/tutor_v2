@@ -95,6 +95,26 @@ describe('results the tutor can click', () => {
     expect(html.indexOf('Done.')).toBeLessThan(html.indexOf('<details class="steps">'));
     expect(html).toContain('<div class="results"><a href="/s/mina#roadmap">Course plan</a></div>');
   });
+
+  it('offers undo under the latest step only, and redo on the note of the step undone last', () => {
+    const at = 'x';
+    const entries = [
+      { role: 'tutor', text: 'One', at },
+      { role: 'files', files: [], at, step: 1 },
+      { role: 'tutor', text: 'Two', at },
+      { role: 'files', files: ['students/mina/roadmap.md'], at, step: 2 },
+      { role: 'system', kind: 'undone', step: 2, text: 'students/mina/roadmap.md', pdfs: 1, at },
+    ] as Parameters<typeof renderEntries>[0];
+    const html = renderEntries(entries, t, 'mina', { undo: 1, redo: 2 });
+    expect(html.match(/data-undo="1"/g)).toHaveLength(1);
+    expect(html).not.toMatch(/data-undo="2">Undo/);
+    expect(html).toContain('data-undo="2" data-redo>Put it back</button>');
+    expect(html).toContain('Its PDFs were removed');
+    // Each turn is its own box.
+    expect(html.match(/<div class="turn">/g)).toHaveLength(2);
+    // A step with nothing to link and nothing to undo shows nothing.
+    expect(renderEntries(entries.slice(0, 2), t, 'mina', {})).not.toContain('results');
+  });
 });
 
 describe('models and thinking', () => {
